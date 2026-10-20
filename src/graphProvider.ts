@@ -7,7 +7,8 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
 
   constructor(
     private readonly extensionUri: vscode.Uri,
-    private readonly jj: JJRunner
+    private readonly jj: JJRunner,
+    private readonly getActiveRemote: () => Promise<string | undefined>
   ) {}
 
   resolveWebviewView(
@@ -26,6 +27,25 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
         await vscode.commands.executeCommand('jj.selectCommit', message.changeId);
       } else if (message.command === 'openMultiDiff') {
         await vscode.commands.executeCommand('jj.openMultiDiff', message.changeId);
+      } else if (message.command === 'abandonCommit') {
+        const { changeId } = message;
+        if (!changeId) return;
+
+        const confirm = await vscode.window.showWarningMessage(
+          `Are you sure you want to abandon commit '${changeId}'?`,
+          { modal: true },
+          'Abandon'
+        );
+
+        if (confirm === 'Abandon') {
+          try {
+            await this.jj.abandonChange(changeId);
+            vscode.window.showInformationMessage(`Abandoned commit '${changeId}'.`);
+            await vscode.commands.executeCommand('jj.refresh');
+          } catch (err: any) {
+            vscode.window.showErrorMessage(`Failed to abandon commit: ${err.message}`);
+          }
+        }
       } else if (message.command === 'rebase') {
         const { source, target } = message;
         if (!source || !target || source === target) return;
@@ -84,7 +104,7 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
           [
             { label: '$(diff-multiple) Open Unified Diff for Commit', action: 'multidiff' },
             { label: '$(bookmark) Create Bookmark Here', action: 'bookmark' },
-            { label: '$(folder-library) Create Workspace Here', action: 'workspace' },
+            { label: '$(trash) Abandon Commit', action: 'abandon' },
             { label: '$(check) Edit This Change', action: 'edit' },
           ],
           { placeHolder: `Actions for commit ${changeId}` }
@@ -96,8 +116,21 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
           await vscode.commands.executeCommand('jj.openMultiDiff', changeId);
         } else if (choice.action === 'bookmark') {
           await vscode.commands.executeCommand('jj.createBookmark', changeId);
-        } else if (choice.action === 'workspace') {
-          await vscode.commands.executeCommand('jj.addWorkspace', changeId);
+        } else if (choice.action === 'abandon') {
+          const confirm = await vscode.window.showWarningMessage(
+            `Are you sure you want to abandon commit '${changeId}'?`,
+            { modal: true },
+            'Abandon'
+          );
+          if (confirm === 'Abandon') {
+            try {
+              await this.jj.abandonChange(changeId);
+              vscode.window.showInformationMessage(`Abandoned commit '${changeId}'.`);
+              await vscode.commands.executeCommand('jj.refresh');
+            } catch (err: any) {
+              vscode.window.showErrorMessage(`Failed to abandon commit: ${err.message}`);
+            }
+          }
         } else if (choice.action === 'edit') {
           await this.jj.editChange(changeId);
           await vscode.commands.executeCommand('jj.refresh');
@@ -111,7 +144,8 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
   async refresh(selectedCommitId?: string) {
     if (!this._view) return;
     try {
-      const commits = await this.jj.getCommitGraph();
+      const activeRemote = await this.getActiveRemote();
+      const commits = await this.jj.getCommitGraph(activeRemote);
       const current = await this.jj.getChangeInfo('@');
       this._view.webview.html = this.getHtml(commits, current?.changeId ?? '', selectedCommitId);
     } catch {
@@ -128,9 +162,7 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
   <style>
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
     body {
       font-family: var(--vscode-font-family);
       font-size: var(--vscode-font-size);
@@ -143,12 +175,8 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
       touch-action: none;
       position: relative;
     }
-    body.is-dragging {
-      cursor: grabbing !important;
-    }
-    #graph-container {
-      position: relative;
-    }
+    body.is-dragging { cursor: grabbing !important; }
+    #graph-container { position: relative; }
     .commit-row {
       display: flex;
       align-items: center;
@@ -159,17 +187,13 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
       position: relative;
       transition: background-color 0.12s ease;
     }
-    .commit-row:hover {
-      background-color: var(--vscode-list-hoverBackground);
-    }
+    .commit-row:hover { background-color: var(--vscode-list-hoverBackground); }
     .commit-row.selected {
       background-color: var(--vscode-list-activeSelectionBackground);
       color: var(--vscode-list-activeSelectionForeground);
       outline: 1px solid var(--vscode-focusBorder);
     }
-    .commit-row.is-rebased-source {
-      opacity: 0.35;
-    }
+    .commit-row.is-rebased-source { opacity: 0.35; }
     .graph-rail-container {
       height: 36px;
       flex-shrink: 0;
@@ -179,7 +203,7 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
     .commit-content {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 6px;
       overflow: hidden;
       white-space: nowrap;
       text-overflow: ellipsis;
@@ -194,26 +218,19 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
       color: var(--vscode-textLink-foreground);
       flex-shrink: 0;
     }
-    .commit-row.selected .change-id {
-      color: var(--vscode-list-activeSelectionForeground);
-    }
-    .change-id .dim {
-      opacity: 0.6;
-      font-weight: normal;
-    }
+    .commit-row.selected .change-id { color: var(--vscode-list-activeSelectionForeground); }
+    .change-id .dim { opacity: 0.6; font-weight: normal; }
     .description {
       overflow: hidden;
       text-overflow: ellipsis;
       color: var(--vscode-foreground);
       font-size: var(--vscode-font-size);
     }
-    .commit-row.selected .description {
-      color: var(--vscode-list-activeSelectionForeground);
-    }
+    .commit-row.selected .description { color: var(--vscode-list-activeSelectionForeground); }
     .pill {
       font-size: calc(var(--vscode-font-size) * 0.82);
       line-height: 16px;
-      padding: 1px 7px;
+      padding: 1px 6px;
       border-radius: 12px;
       font-weight: 600;
       display: inline-flex;
@@ -226,48 +243,61 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
       border: 1px solid var(--vscode-activityBarBadge-background);
     }
     .pill-bookmark {
-      background-color: rgba(63, 185, 80, 0.2);
+      background-color: rgba(63, 185, 80, 0.15);
       color: #3fb950;
       border: 1px solid #2ea043;
     }
+    .pill-remote-bookmark {
+      background-color: rgba(88, 166, 255, 0.15);
+      color: #58a6ff;
+      border: 1px solid #1f6feb;
+    }
     .pill-worktree {
-      background-color: rgba(163, 113, 247, 0.2);
+      background-color: rgba(163, 113, 247, 0.15);
       color: #bc8cff;
       border: 1px solid #8957e5;
     }
     .pill-conflict {
-      background-color: rgba(248, 81, 73, 0.2);
+      background-color: rgba(248, 81, 73, 0.15);
       color: #f85149;
       border: 1px solid #da3633;
     }
     .pill-changes {
-      background-color: rgba(210, 153, 34, 0.2);
+      background-color: rgba(210, 153, 34, 0.15);
       color: #e3b341;
       border: 1px dashed #d29922;
     }
-    .diff-action-btn {
+    .action-button-group {
       display: none;
       align-items: center;
+      gap: 2px;
+      margin-left: auto;
+      flex-shrink: 0;
+      pointer-events: auto;
+    }
+    .commit-row:hover .action-button-group,
+    .commit-row.selected .action-button-group {
+      display: inline-flex;
+    }
+    .commit-action-btn {
+      display: inline-flex;
+      align-items: center;
       justify-content: center;
-      width: 24px;
-      height: 24px;
+      width: 22px;
+      height: 22px;
       padding: 2px;
       border-radius: 3px;
       cursor: pointer;
       color: var(--vscode-icon-foreground);
       background: transparent;
       border: none;
-      margin-left: auto;
-      flex-shrink: 0;
-      pointer-events: auto;
     }
-    .commit-row:hover .diff-action-btn,
-    .commit-row.selected .diff-action-btn {
-      display: inline-flex;
-    }
-    .diff-action-btn:hover {
+    .commit-action-btn:hover {
       background-color: var(--vscode-toolbar-hoverBackground);
       color: var(--vscode-foreground);
+    }
+    .commit-action-btn.btn-delete:hover {
+      color: var(--vscode-errorForeground, #f85149);
     }
 
     #overlay-canvas {
@@ -329,14 +359,7 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
     const LANE_WIDTH = 20;
     const ROW_HEIGHT = 36;
     const MID_Y = ROW_HEIGHT / 2;
-    const COLORS = [
-      '#007acc',
-      '#3fb950',
-      '#bc8cff',
-      '#f0883e',
-      '#58a6ff',
-      '#d29922'
-    ];
+    const COLORS = ['#007acc', '#3fb950', '#bc8cff', '#f0883e', '#58a6ff', '#d29922'];
 
     function computeLayout(commitList) {
       const rowLanes = [];
@@ -361,7 +384,6 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
 
         rowLanes[r] = myLane;
         maxLanes = Math.max(maxLanes, activeTracks.length);
-
         const paths = [];
 
         activeTracks.forEach((trackId, lIdx) => {
@@ -375,7 +397,6 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
         });
 
         const nodeX = myLane * LANE_WIDTH + LANE_WIDTH / 2;
-
         if (!isHead) {
           paths.push({
             d: \`M \${nodeX} 0 L \${nodeX} \${MID_Y}\`,
@@ -384,7 +405,6 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
         }
 
         activeTracks[myLane] = null;
-
         const parents = c.parentIds || [];
         if (parents.length > 0) {
           parents.forEach((parentId, pIdx) => {
@@ -442,9 +462,9 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
       row.dataset.changeId = c.changeId;
       row.dataset.rowIdx = idx;
       row.dataset.lane = rowLanes[idx];
-      row.title = "Click to inspect in source control. Click icon to open unified diff. Double click to edit.";
+      row.title = "Click to inspect. Double click to edit.";
 
-      row.addEventListener('click', (e) => {
+      row.addEventListener('click', () => {
         if (dragThresholdPassed) return;
         vscode.postMessage({ command: 'selectCommit', changeId: c.changeId });
       });
@@ -493,6 +513,9 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
       c.bookmarks.forEach(b => {
         tagsHtml += \`<span class="pill pill-bookmark">\${b}</span>\`;
       });
+      c.remoteBookmarks.forEach(rb => {
+        tagsHtml += \`<span class="pill pill-remote-bookmark">\${rb}</span>\`;
+      });
       if (c.isConflict) {
         tagsHtml += \`<span class="pill pill-conflict">💥 conflict</span>\`;
       }
@@ -509,14 +532,21 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
           \${tagsHtml}
           <span class="description">\${descText}</span>
         </div>
-        <button class="diff-action-btn" title="Open Unified Multi-Diff Editor for this commit">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M1 2.5A1.5 1.5 0 0 1 2.5 1h11A1.5 1.5 0 0 1 15 2.5v11a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 13.5v-11zM2.5 2a.5.5 0 0 0-.5.5v11a.5.5 0 0 0 .5.5h5V2h-5zm6 0v12h5a.5.5 0 0 0 .5-.5v-11a.5.5 0 0 0-.5-.5h-5z"/>
-          </svg>
-        </button>
+        <div class="action-button-group">
+          <button class="commit-action-btn btn-diff" title="Open Unified Multi-Diff Editor for this commit">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M1 2.5A1.5 1.5 0 0 1 2.5 1h11A1.5 1.5 0 0 1 15 2.5v11a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 13.5v-11zM2.5 2a.5.5 0 0 0-.5.5v11a.5.5 0 0 0 .5.5h5V2h-5zm6 0v12h5a.5.5 0 0 0 .5-.5v-11a.5.5 0 0 0-.5-.5h-5z"/>
+            </svg>
+          </button>
+          <button class="commit-action-btn btn-delete" title="Abandon commit">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M11 1.75V3h2.25a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1 0-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75ZM6.5 1.5h3a.25.25 0 0 0-.25-.25h-2.5a.25.25 0 0 0-.25.25ZM3.5 5.5v8.25c0 .69.56 1.25 1.25 1.25h6.5c.69 0 1.25-.56 1.25-1.25V5.5h-9Zm3 2a.5.5 0 0 1 .5.5v4.5a.5.5 0 0 1-1 0V8a.5.5 0 0 1 .5-.5Zm3 0a.5.5 0 0 1 .5.5v4.5a.5.5 0 0 1-1 0V8a.5.5 0 0 1 .5-.5Z"/>
+            </svg>
+          </button>
+        </div>
       \`;
 
-      const diffBtn = row.querySelector('.diff-action-btn');
+      const diffBtn = row.querySelector('.btn-diff');
       if (diffBtn) {
         diffBtn.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -524,8 +554,16 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
         });
       }
 
+      const deleteBtn = row.querySelector('.btn-delete');
+      if (deleteBtn) {
+        deleteBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          vscode.postMessage({ command: 'abandonCommit', changeId: c.changeId });
+        });
+      }
+
       row.addEventListener('pointerdown', (e) => {
-        if (e.button !== 0 || (e.target && e.target.closest('.diff-action-btn'))) return;
+        if (e.button !== 0 || (e.target && e.target.closest('.commit-action-btn'))) return;
         isMouseDown = true;
         dragThresholdPassed = false;
         draggedElement = row;
@@ -561,7 +599,6 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
 
       const circleX = (circleRect.left - containerRect.left) + (circleRect.width / 2);
       const circleY = (circleRect.top - containerRect.top) + (circleRect.height / 2);
-
       const branchEndX = totalRailWidth + 24;
       const branchEndY = circleY - 14;
 
@@ -576,7 +613,6 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
       outwardCircle.setAttribute('cy', branchEndY);
 
       overlay.style.display = 'block';
-
       outwardTooltip.textContent = \`↪ Rebase \${sourceId} onto \${targetId}\`;
       outwardTooltip.style.left = (branchEndX + 8) + 'px';
       outwardTooltip.style.top = branchEndY + 'px';

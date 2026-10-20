@@ -39,6 +39,12 @@
         "icon": "$(sync)"
       },
       {
+        "command": "jj.selectRemote",
+        "category": "JJ",
+        "title": "Select Active Remote",
+        "icon": "$(cloud)"
+      },
+      {
         "command": "jj.openMultiDiff",
         "category": "JJ",
         "title": "Open Unified Multi-Diff for Selected Commit",
@@ -79,12 +85,6 @@
         "category": "JJ",
         "title": "Create Bookmark",
         "icon": "$(bookmark)"
-      },
-      {
-        "command": "jj.addWorkspace",
-        "category": "JJ",
-        "title": "Add Workspace",
-        "icon": "$(folder-library)"
       },
       {
         "command": "jj.manageWorkspaces",
