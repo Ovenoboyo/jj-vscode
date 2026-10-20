@@ -1,0 +1,309 @@
+{
+  "name": "jj",
+  "displayName": "jj",
+  "description": "Jujutsu SCM extension for VS Code with interactive graph, remote manager, and multi-diff inspection",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Source Control"
+  ],
+  "activationEvents": [
+    "onView:workbench.scm",
+    "workspaceContains:.jj"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "views": {
+      "scm": [
+        {
+          "type": "webview",
+          "id": "jjGraphView",
+          "name": "JJ Graph",
+          "when": "jj:isRepo"
+        },
+        {
+          "type": "tree",
+          "id": "jjRemotesView",
+          "name": "JJ Remotes",
+          "when": "jj:isRepo"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "jj.refresh",
+        "category": "JJ",
+        "title": "Refresh",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "jj.openMultiDiff",
+        "category": "JJ",
+        "title": "Open Unified Multi-Diff for Selected Commit",
+        "icon": "$(diff-multiple)"
+      },
+      {
+        "command": "jj.addRemote",
+        "category": "JJ",
+        "title": "Add Remote",
+        "icon": "$(plus)"
+      },
+      {
+        "command": "jj.removeRemote",
+        "category": "JJ",
+        "title": "Remove Remote",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "jj.sync",
+        "category": "JJ",
+        "title": "Sync with Remote",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "jj.fetch",
+        "category": "JJ",
+        "title": "Fetch Remotes",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "jj.new",
+        "category": "JJ",
+        "title": "New Change",
+        "icon": "$(plus)"
+      },
+      {
+        "command": "jj.createBookmark",
+        "category": "JJ",
+        "title": "Create Bookmark",
+        "icon": "$(bookmark)"
+      },
+      {
+        "command": "jj.addWorkspace",
+        "category": "JJ",
+        "title": "Add Workspace",
+        "icon": "$(folder-library)"
+      },
+      {
+        "command": "jj.manageWorkspaces",
+        "category": "JJ",
+        "title": "Manage Workspaces",
+        "icon": "$(folder)"
+      },
+      {
+        "command": "jj.describe",
+        "category": "JJ",
+        "title": "Describe Working Copy",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "jj.describeWorking",
+        "category": "JJ",
+        "title": "Describe Working Copy",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "jj.describeParent",
+        "category": "JJ",
+        "title": "Describe Parent",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "jj.switchBookmark",
+        "category": "JJ",
+        "title": "Switch Bookmark",
+        "icon": "$(bookmark)"
+      },
+      {
+        "command": "jj.rebase",
+        "category": "JJ",
+        "title": "Rebase Change",
+        "icon": "$(git-merge)"
+      },
+      {
+        "command": "jj.edit",
+        "category": "JJ",
+        "title": "Edit Change",
+        "icon": "$(check)"
+      },
+      {
+        "command": "jj.squashWorking",
+        "category": "JJ",
+        "title": "Squash into Parent",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "jj.squashParent",
+        "category": "JJ",
+        "title": "Squash into Parent (@--)",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "jj.openFile",
+        "category": "JJ",
+        "title": "View File",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "jj.revertFile",
+        "category": "JJ",
+        "title": "Revert Changes",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "jj.moveFileToWorking",
+        "category": "JJ",
+        "title": "Move to Working Copy",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "jj.squashFile",
+        "category": "JJ",
+        "title": "Squash File into Parent",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "jj.openConflictResolver",
+        "category": "JJ",
+        "title": "Resolve Conflict",
+        "icon": "$(git-merge)"
+      },
+      {
+        "command": "jj.resolveConflict",
+        "category": "JJ",
+        "title": "Mark Conflict as Resolved",
+        "icon": "$(check)"
+      },
+      {
+        "command": "jj.squashConflictFile",
+        "category": "JJ",
+        "title": "Squash Conflicted File into Parent",
+        "icon": "$(arrow-down)"
+      }
+    ],
+    "menus": {
+      "scm/title": [
+        {
+          "command": "jj.refresh",
+          "group": "navigation@1",
+          "when": "scmProvider == jj"
+        },
+        {
+          "command": "jj.new",
+          "group": "navigation@2",
+          "when": "scmProvider == jj"
+        },
+        {
+          "command": "jj.createBookmark",
+          "group": "navigation@3",
+          "when": "scmProvider == jj"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "jj.refresh",
+          "group": "navigation",
+          "when": "view == jjGraphView || view == jjRemotesView"
+        },
+        {
+          "command": "jj.addRemote",
+          "group": "navigation",
+          "when": "view == jjRemotesView"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "jj.removeRemote",
+          "group": "inline",
+          "when": "view == jjRemotesView && viewItem == jjRemoteItem"
+        }
+      ],
+      "scm/resourceGroup/context": [
+        {
+          "command": "jj.describeWorking",
+          "group": "inline@1",
+          "when": "scmProvider == jj && scmResourceGroup == working"
+        },
+        {
+          "command": "jj.squashWorking",
+          "group": "inline@2",
+          "when": "scmProvider == jj && scmResourceGroup == working"
+        },
+        {
+          "command": "jj.describeParent",
+          "group": "inline@1",
+          "when": "scmProvider == jj && scmResourceGroup == parent"
+        },
+        {
+          "command": "jj.squashParent",
+          "group": "inline@2",
+          "when": "scmProvider == jj && scmResourceGroup == parent"
+        }
+      ],
+      "scm/resourceState/context": [
+        {
+          "command": "jj.resolveConflict",
+          "group": "inline@1",
+          "when": "scmProvider == jj && (scmResourceState == jjConflictFileItem || scmResourceState == jjConflictFileDeletionItem)"
+        },
+        {
+          "command": "jj.squashConflictFile",
+          "group": "inline@2",
+          "when": "scmProvider == jj && (scmResourceState == jjConflictFileItem || scmResourceState == jjConflictFileDeletionItem)"
+        },
+        {
+          "command": "jj.openFile",
+          "group": "inline@3",
+          "when": "scmProvider == jj && scmResourceState != jjConflictFileItem && scmResourceState != jjConflictFileDeletionItem"
+        },
+        {
+          "command": "jj.revertFile",
+          "group": "inline@4",
+          "when": "scmProvider == jj && scmResourceState != jjConflictFileItem && scmResourceState != jjConflictFileDeletionItem"
+        },
+        {
+          "command": "jj.moveFileToWorking",
+          "group": "inline@5",
+          "when": "scmProvider == jj && scmResourceState == jjParentFileItem"
+        },
+        {
+          "command": "jj.squashFile",
+          "group": "inline@6",
+          "when": "scmProvider == jj && (scmResourceState == jjWorkingFileItem || scmResourceState == jjParentFileItem)"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "pnpm run package",
+    "compile": "pnpm run check-types && pnpm run lint && node esbuild.js",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "package": "pnpm run check-types && pnpm run lint && node esbuild.js --production",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "pnpm run compile-tests && pnpm run compile && pnpm run lint",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "24.x",
+    "typescript-eslint": "^8.61.1",
+    "eslint": "^10.5.0",
+    "esbuild": "^0.28.1",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^6.0.3",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0"
+  },
+  "overrides": {
+    "diff": "^8.0.4",
+    "serialize-javascript": "^7.0.6"
+  }
+}
