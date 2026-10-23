@@ -129,6 +129,12 @@
         "icon": "$(check)"
       },
       {
+        "command": "jj.converge",
+        "category": "JJ",
+        "title": "Converge Divergent Changes",
+        "icon": "$(git-merge)"
+      },
+      {
         "command": "jj.squashWorking",
         "category": "JJ",
         "title": "Squash into Parent",

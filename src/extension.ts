@@ -19,9 +19,12 @@ class JJContentProvider implements vscode.TextDocumentContentProvider {
   constructor(private readonly jj: JJRunner) {}
 
   async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
+    const cleanPath = uri.path.startsWith('/') ? uri.path.slice(1) : uri.path;
+    if (cleanPath === 'empty-file') {
+      return '';
+    }
     const rev = uri.query || '@-';
-    const relativePath = uri.path.startsWith('/') ? uri.path.slice(1) : uri.path;
-    return await this.jj.showFile(relativePath, rev);
+    return await this.jj.showFile(cleanPath, rev);
   }
 }
 
@@ -62,8 +65,8 @@ export function activate(context: vscode.ExtensionContext) {
   let conflictsGroup: vscode.SourceControlResourceGroup | undefined;
   let workingGroup: vscode.SourceControlResourceGroup | undefined;
   let secondaryGroup: vscode.SourceControlResourceGroup | undefined;
-  let statusBar: vscode.StatusBarItem | undefined;
   let remoteStatusBar: vscode.StatusBarItem | undefined;
+  let statusBar: vscode.StatusBarItem | undefined;
   let syncStatusBar: vscode.StatusBarItem | undefined;
 
   let selectedCommitId: string | undefined = undefined;
@@ -119,8 +122,8 @@ export function activate(context: vscode.ExtensionContext) {
         workingGroup = undefined;
         secondaryGroup = undefined;
       }
-      if (statusBar) statusBar.hide();
       if (remoteStatusBar) remoteStatusBar.hide();
+      if (statusBar) statusBar.hide();
       if (syncStatusBar) syncStatusBar.hide();
       return false;
     }
@@ -135,19 +138,17 @@ export function activate(context: vscode.ExtensionContext) {
       secondaryGroup = scm.createResourceGroup('secondary', 'Parent');
       secondaryGroup.hideWhenEmpty = false;
 
-      // Status Bar: Active Bookmark
-      statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-      statusBar.command = 'jj.switchBookmark';
-
-      // Status Bar: Active Remote selector
-      remoteStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
+      // Status Bar Ordering: Remote (left: priority 100), Bookmark (priority 99), Sync (priority 98)
+      remoteStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
       remoteStatusBar.command = 'jj.selectRemote';
 
-      // Status Bar: Remote divergence
+      statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
+      statusBar.command = 'jj.switchBookmark';
+
       syncStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
       syncStatusBar.command = 'jj.sync';
 
-      context.subscriptions.push(scm, conflictsGroup, workingGroup, secondaryGroup, statusBar, remoteStatusBar, syncStatusBar);
+      context.subscriptions.push(scm, conflictsGroup, workingGroup, secondaryGroup, remoteStatusBar, statusBar, syncStatusBar);
     }
 
     return true;
@@ -159,7 +160,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     try {
       const ready = await ensureInitialized();
-      if (!ready || !scm || !conflictsGroup || !workingGroup || !secondaryGroup || !statusBar || !remoteStatusBar || !syncStatusBar) {
+      if (!ready || !scm || !conflictsGroup || !workingGroup || !secondaryGroup || !remoteStatusBar || !statusBar || !syncStatusBar) {
         return;
       }
 
@@ -172,8 +173,20 @@ export function activate(context: vscode.ExtensionContext) {
 
       scm.inputBox.placeholder = `Describe change (${current.changeId}) - press + or run Describe`;
 
-      // 1. Active bookmark component
-      const activeBookmark = await jj.getActiveBookmark();
+      // 1. Remote Component (Placed on the left)
+      const remotes = await jj.getRemotes();
+      const activeRemote = await getActiveRemote();
+
+      if (remotes.length > 0 && activeRemote) {
+        remoteStatusBar.text = `$(cloud) ${activeRemote}`;
+        remoteStatusBar.tooltip = `Active Remote: ${activeRemote}\nClick to switch active remote`;
+        remoteStatusBar.show();
+      } else {
+        remoteStatusBar.hide();
+      }
+
+      // 2. Bookmark Component (To the right of the remote component)
+      const activeBookmark = await jj.getActiveBookmark(activeRemote);
       if (activeBookmark) {
         statusBar.text = `$(bookmark) ${activeBookmark}`;
         statusBar.tooltip = `Active Bookmark: ${activeBookmark}\nCommit: ${current.changeId} (${current.commitId})\n\nClick to switch bookmark`;
@@ -182,26 +195,18 @@ export function activate(context: vscode.ExtensionContext) {
         statusBar.hide();
       }
 
-      // 2. Active Remote Selector & Divergence
-      const remotes = await jj.getRemotes();
-      const activeRemote = await getActiveRemote();
-
+      // 3. Sync Component
       if (remotes.length > 0 && activeRemote) {
-        remoteStatusBar.text = `$(cloud) ${activeRemote}`;
-        remoteStatusBar.tooltip = `Active Remote: ${activeRemote}\nClick to switch active remote`;
-        remoteStatusBar.show();
-
         const syncStatus = await jj.getSyncStatus(activeRemote);
         if (syncStatus) {
           syncStatusBar.text = `$(sync) ↑${syncStatus.ahead} ↓${syncStatus.behind}`;
           const bLabel = syncStatus.bookmark !== '(none)' ? `on '${syncStatus.bookmark}' ` : '';
-          syncStatusBar.tooltip = `${syncStatus.remote}: ${syncStatus.ahead} unpushed commit(s) in current chain, ${syncStatus.behind} incoming from ${bLabel}${syncStatus.remote}\nClick to sync`;
+          syncStatusBar.tooltip = `${syncStatus.remote}: ${syncStatus.ahead} unpushed commit(s) in current chain, ${syncStatus.behind} incoming from ${bLabel}${syncStatus.remote}\nClick to pull & push`;
           syncStatusBar.show();
         } else {
           syncStatusBar.hide();
         }
       } else {
-        remoteStatusBar.hide();
         syncStatusBar.hide();
       }
 
@@ -386,7 +391,7 @@ export function activate(context: vscode.ExtensionContext) {
     };
   }
 
-  // --- Commands (All prefixed with JJ: for Command Palette) ---
+  // --- Commands ---
 
   const selectRemoteCmd = vscode.commands.registerCommand('jj.selectRemote', async () => {
     try {
@@ -433,16 +438,16 @@ export function activate(context: vscode.ExtensionContext) {
           return;
         }
 
-        const resources: [vscode.Uri, vscode.Uri][] = diffFiles.map((file) => {
+        const resources: [vscode.Uri, vscode.Uri | undefined, vscode.Uri | undefined][] = diffFiles.map((file) => {
           const fileUri = vscode.Uri.file(path.join(rootPath, file.path));
 
-          let originalUri = vscode.Uri.from({
+          let originalUri: vscode.Uri | undefined = vscode.Uri.from({
             scheme: JJ_DIFF_SCHEME,
             path: file.path,
             query: parentRev,
           });
 
-          let modifiedUri =
+          let modifiedUri: vscode.Uri | undefined =
             rev === '@'
               ? fileUri
               : vscode.Uri.from({
@@ -452,12 +457,12 @@ export function activate(context: vscode.ExtensionContext) {
                 });
 
           if (file.status === 'A') {
-            originalUri = originalUri.with({ path: 'empty-file' });
+            originalUri = undefined;
           } else if (file.status === 'D') {
-            modifiedUri = originalUri.with({ path: 'empty-file' });
+            modifiedUri = undefined;
           }
 
-          return [originalUri, modifiedUri];
+          return [fileUri, originalUri, modifiedUri];
         });
 
         const title = `Changes in ${info.changeId}${info.description ? ` (${info.description.split('\n')[0]})` : ''}`;
@@ -733,44 +738,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
-  const manageWorkspacesCmd = vscode.commands.registerCommand('jj.manageWorkspaces', async () => {
-    try {
-      const workspaces = await jj.getWorkspaces();
-      if (workspaces.length <= 1) {
-        vscode.window.showInformationMessage('Only the default workspace exists.');
-        return;
-      }
-
-      const picks = workspaces
-        .filter((w) => !w.isDefault)
-        .map((w) => ({
-          label: `$(folder) ${w.name}`,
-          description: `Commit: ${w.changeId}`,
-          workspace: w,
-        }));
-
-      const selected = await vscode.window.showQuickPick(picks, {
-        placeHolder: 'Select a workspace to forget / disconnect',
-      });
-
-      if (!selected) return;
-
-      const confirm = await vscode.window.showWarningMessage(
-        `Forget workspace '${selected.workspace.name}'? (Files on disk will remain untouched)`,
-        { modal: true },
-        'Forget'
-      );
-
-      if (confirm === 'Forget') {
-        await jj.forgetWorkspace(selected.workspace.name);
-        vscode.window.showInformationMessage(`Workspace '${selected.workspace.name}' forgotten.`);
-        await refresh();
-      }
-    } catch (err: any) {
-      vscode.window.showErrorMessage(err.message);
-    }
-  });
-
+  // Directly pulls from active remote and pushes ahead bookmark without interactive prompts
   const syncCmd = vscode.commands.registerCommand('jj.sync', async () => {
     const remote = await getActiveRemote();
     if (!remote) {
@@ -780,34 +748,18 @@ export function activate(context: vscode.ExtensionContext) {
 
     try {
       await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: `Fetching from ${remote}...` },
+        { location: vscode.ProgressLocation.Notification, title: `Syncing with ${remote}...` },
         async () => {
           await jj.fetchRemote(remote);
+          const status = await jj.getSyncStatus(remote);
+          if (status && status.ahead > 0 && status.bookmark !== '(none)') {
+            await jj.advanceAndPushBookmark(status.bookmark, remote);
+          }
         }
       );
-
-      const status = await jj.getSyncStatus(remote);
-      if (status && status.ahead > 0 && status.bookmark !== '(none)') {
-        const pushChoice = await vscode.window.showInformationMessage(
-          `Fetched remote. You have ${status.ahead} commit(s) ready to push on '${status.bookmark}'.`,
-          'Push Bookmark'
-        );
-        if (pushChoice === 'Push Bookmark') {
-          await vscode.window.withProgress(
-            {
-              location: vscode.ProgressLocation.Notification,
-              title: `Advancing '${status.bookmark}' and pushing to ${remote}...`,
-            },
-            async () => {
-              await jj.advanceAndPushBookmark(status.bookmark, remote);
-            }
-          );
-          vscode.window.showInformationMessage(`Advanced '${status.bookmark}' and pushed to ${remote}.`);
-        }
-      }
       await refresh();
     } catch (err: any) {
-      vscode.window.showErrorMessage(err.message);
+      vscode.window.showErrorMessage(`Sync error: ${err.message}`);
     }
   });
 
@@ -965,13 +917,16 @@ export function activate(context: vscode.ExtensionContext) {
 
   const switchBookmarkCmd = vscode.commands.registerCommand('jj.switchBookmark', async () => {
     try {
-      const bookmarks = await jj.getBookmarks();
+      const activeRemote = await getActiveRemote();
+      const bookmarks = await jj.getBookmarks(activeRemote);
       if (bookmarks.length === 0) {
         vscode.window.showInformationMessage('No bookmarks found.');
         return;
       }
       const selected = await vscode.window.showQuickPick(bookmarks, {
-        placeHolder: 'Select bookmark to switch to (e.g. main, new-bookmark@local, main@origin)',
+        placeHolder: activeRemote
+          ? `Select bookmark for remote '${activeRemote}' to switch to (e.g. main, new-bookmark@${activeRemote})`
+          : 'Select bookmark to switch to (e.g. main, @-)',
       });
       if (selected) {
         await jj.switchBookmark(selected);
@@ -1021,6 +976,25 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
 
+  const convergeCmd = vscode.commands.registerCommand('jj.converge', async (target?: string) => {
+    try {
+      const targetRev =
+        target ||
+        (await vscode.window.showInputBox({
+          prompt: 'Enter revision or change ID to converge',
+          value: selectedCommitId || '',
+          placeHolder: 'e.g. k, change_id(...)',
+        }));
+      if (targetRev) {
+        await jj.converge(targetRev.trim());
+        vscode.window.showInformationMessage(`Converged divergent changes for '${targetRev.trim()}'.`);
+        await refresh();
+      }
+    } catch (err: any) {
+      vscode.window.showErrorMessage(`Failed to converge: ${err.message}`);
+    }
+  });
+
   const refreshCmd = vscode.commands.registerCommand('jj.refresh', () => refresh());
 
   const workspaceWatcher = vscode.workspace.createFileSystemWatcher('**/*');
@@ -1051,7 +1025,6 @@ export function activate(context: vscode.ExtensionContext) {
     squashConflictFileCmd,
     selectCommitCmd,
     createBookmarkCmd,
-    manageWorkspacesCmd,
     syncCmd,
     fetchCmd,
     describeWorkingCmd,
@@ -1067,6 +1040,7 @@ export function activate(context: vscode.ExtensionContext) {
     switchBookmarkCmd,
     editCmd,
     rebaseCmd,
+    convergeCmd,
     workspaceWatcher,
     jjOpWatcher
   );
