@@ -27,7 +27,7 @@ export class JJRemotesProvider implements vscode.TreeDataProvider<JJRemoteTreeIt
 
   async getChildren(): Promise<JJRemoteTreeItem[]> {
     const isRepo = await this.jj.isRepo();
-    if (!isRepo) return [];
+    if (!isRepo) {return [];}
 
     const remotes = await this.jj.getRemotes();
     return remotes.map((r) => new JJRemoteTreeItem(r));

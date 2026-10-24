@@ -6,49 +6,15 @@ import * as fs from 'fs/promises';
 
 const execFileAsync = promisify(execFile);
 
-export interface JJChangeInfo {
-  changeId: string;
-  shortestLen: number;
-  commitId: string;
-  description: string;
-  bookmarks: string[];
-  remoteBookmarks: string[];
-  isConflict: boolean;
-  isDivergent?: boolean;
-  workingCopies: string[];
-  parentIds: string[];
-  empty: boolean;
-}
-
-export interface JJDiffFile {
-  status: 'M' | 'A' | 'D' | 'R' | string;
-  path: string;
-}
-
-export interface RemoteSyncStatus {
-  ahead: number;
-  behind: number;
-  bookmark: string;
-  remote: string;
-}
-
-export interface JJWorkspace {
-  name: string;
-  changeId: string;
-  commitId: string;
-  isDefault: boolean;
-}
-
-export interface JJConflictEntry {
-  path: string;
-  details: string;
-  isDeletion: boolean;
-}
-
-export interface JJRemoteInfo {
-  name: string;
-  url: string;
-}
+export * from './types';
+import {
+  JJChangeInfo,
+  JJDiffFile,
+  RemoteSyncStatus,
+  JJWorkspace,
+  JJConflictEntry,
+  JJRemoteInfo,
+} from './types';
 
 export class JJRunner {
   constructor(private readonly workspaceRoot: string) {}
@@ -125,7 +91,7 @@ export class JJRunner {
         template,
       ]);
 
-      if (!output) return null;
+      if (!output) {return null;}
 
       const [shortestPrefix, rawShortId, commitId, description, bookmarkStr, remoteBookmarkStr, conflictStr, wcStr, parentStr, emptyStr, divergentStr] = output.split('\0');
       const rawBookmarks = bookmarkStr ? bookmarkStr.trim().split(' ').filter(Boolean) : [];
@@ -176,7 +142,7 @@ export class JJRunner {
   async getDiffSummary(rev: string = '@'): Promise<JJDiffFile[]> {
     try {
       const output = await this.run(['diff', '-r', rev, '--summary']);
-      if (!output) return [];
+      if (!output) {return [];}
 
       return output
         .split('\n')
@@ -387,7 +353,7 @@ export class JJRunner {
   async getSyncStatus(targetRemote?: string): Promise<RemoteSyncStatus | null> {
     try {
       const remotes = await this.getRemotes();
-      if (remotes.length === 0) return null;
+      if (remotes.length === 0) {return null;}
 
       const remoteNames = remotes.map((r) => r.name);
       let remote = targetRemote && remoteNames.includes(targetRemote) ? targetRemote : '';
@@ -539,7 +505,7 @@ export class JJRunner {
         ]).catch(() => '');
       }
 
-      if (!output) return [];
+      if (!output) {return [];}
 
       const rawItems = output
         .split('\n')
@@ -616,11 +582,11 @@ export class JJRunner {
       // Compute topological height/depth (distance from root)
       const depthMap = new Map<string, number>();
       function getDepth(id: string, path = new Set<string>()): number {
-        if (depthMap.has(id)) return depthMap.get(id)!;
-        if (path.has(id)) return 0;
+        if (depthMap.has(id)) {return depthMap.get(id)!;}
+        if (path.has(id)) {return 0;}
         path.add(id);
         const item = itemMap.get(id);
-        if (!item) return 0;
+        if (!item) {return 0;}
         let maxP = 0;
         for (const p of item.parentIds) {
           maxP = Math.max(maxP, getDepth(p, path));
@@ -636,7 +602,7 @@ export class JJRunner {
       // Ready heads (commits with 0 children)
       const ready: string[] = [];
       for (const [id, count] of childCount.entries()) {
-        if (count === 0) ready.push(id);
+        if (count === 0) {ready.push(id);}
       }
 
       const sorted: JJChangeInfo[] = [];
@@ -662,11 +628,11 @@ export class JJRunner {
               const sibIdx = ready.findIndex((rId) => {
                 const visited = new Set<string>();
                 function hasAncestor(curr: string): boolean {
-                  if (curr === pId) return true;
-                  if (visited.has(curr)) return false;
+                  if (curr === pId) {return true;}
+                  if (visited.has(curr)) {return false;}
                   visited.add(curr);
                   const it = itemMap.get(curr);
-                  if (!it) return false;
+                  if (!it) {return false;}
                   return it.parentIds.some((p) => hasAncestor(p));
                 }
                 return hasAncestor(rId);
@@ -730,7 +696,7 @@ export class JJRunner {
 
   async newChange(targetRev?: string): Promise<void> {
     const args = ['new'];
-    if (targetRev) args.push(targetRev);
+    if (targetRev) {args.push(targetRev);}
     await this.run(args);
   }
 
@@ -832,7 +798,7 @@ export class JJRunner {
   async getWorkspaces(): Promise<JJWorkspace[]> {
     try {
       const raw = await this.run(['workspace', 'list']);
-      if (!raw) return [];
+      if (!raw) {return [];}
 
       return raw
         .split('\n')
@@ -863,7 +829,7 @@ export class JJRunner {
   async getConflictedFiles(revision: string = '@'): Promise<JJConflictEntry[]> {
     try {
       const raw = await this.run(['resolve', '--list', '-r', revision]);
-      if (!raw) return [];
+      if (!raw) {return [];}
 
       return raw
         .split('\n')

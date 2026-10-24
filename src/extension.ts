@@ -1,19 +1,16 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import * as fs from 'fs/promises';
-import { JJRunner, JJDiffFile, JJChangeInfo } from './jj';
+import { JJRunner } from './jj';
+import { JJDiffFile, JJChangeInfo, JJResourceState, JJRemoteInfo, JJConflictEntry } from './types';
 import { JJGraphWebviewProvider } from './graphProvider';
-import { JJRemotesProvider, JJRemoteTreeItem } from './remotesProvider';
-
-const JJ_DIFF_SCHEME = 'jj-diff';
-const JJ_RESOURCE_SCHEME = 'jj-resource';
-const ACTIVE_REMOTE_KEY = 'jjActiveRemote';
-
-interface JJResourceState extends vscode.SourceControlResourceState {
-  fromRev: string;
-  intoRev: string;
-  relativePath: string;
-}
+import { JJRemotesProvider } from './remotesProvider';
+import { registerConflictCommands } from './conflictResolver';
+import {
+  registerGeneralCommands,
+  JJ_DIFF_SCHEME,
+  JJ_RESOURCE_SCHEME,
+  ACTIVE_REMOTE_KEY,
+} from './commands';
 
 class JJContentProvider implements vscode.TextDocumentContentProvider {
   constructor(private readonly jj: JJRunner) {}
@@ -44,6 +41,72 @@ function formatHighlightedId(info: JJChangeInfo): string {
   return result;
 }
 
+function createResourceState(
+  file: JJDiffFile,
+  root: string,
+  fromRev: string,
+  intoRev: string,
+  fromDisplayId: string,
+  intoDisplayId: string,
+  contextValue: string
+): JJResourceState {
+  const fileUri = vscode.Uri.file(path.join(root, file.path));
+
+  const stateResourceUri =
+    fromRev === '@'
+      ? fileUri
+      : vscode.Uri.from({
+          scheme: JJ_RESOURCE_SCHEME,
+          path: file.path,
+          query: fromRev,
+        });
+
+  const baseUri = vscode.Uri.from({
+    scheme: JJ_DIFF_SCHEME,
+    path: file.path,
+    query: intoRev,
+  });
+
+  const targetUri =
+    fromRev === '@'
+      ? fileUri
+      : vscode.Uri.from({
+          scheme: JJ_DIFF_SCHEME,
+          path: file.path,
+          query: fromRev,
+        });
+
+  const fileName = path.basename(file.path);
+  let title = `${fileName} (${fromDisplayId} vs ${intoDisplayId})`;
+  let leftUri = baseUri;
+  let rightUri = targetUri;
+
+  if (file.status === 'A') {
+    title = `${fileName} (Added in ${fromDisplayId})`;
+    leftUri = baseUri.with({ path: 'empty-file' });
+  } else if (file.status === 'D') {
+    title = `${fileName} (Deleted in ${fromDisplayId})`;
+    rightUri = baseUri.with({ path: 'empty-file' });
+  }
+
+  return {
+    resourceUri: stateResourceUri,
+    contextValue,
+    fromRev,
+    intoRev,
+    relativePath: file.path,
+    decorations: {
+      strikeThrough: file.status === 'D',
+      tooltip: `Status: ${file.status} (${fromDisplayId})`,
+    },
+    command: {
+      title: 'Open Diff',
+      command: 'vscode.diff',
+      arguments: [leftUri, rightUri, title],
+    },
+  };
+}
+
 export function activate(context: vscode.ExtensionContext) {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
@@ -72,8 +135,10 @@ export function activate(context: vscode.ExtensionContext) {
   let selectedCommitId: string | undefined = undefined;
 
   async function getActiveRemote(): Promise<string | undefined> {
-    const remotes = await jj.getRemotes();
-    if (remotes.length === 0) return undefined;
+    const remotes: JJRemoteInfo[] = await jj.getRemotes();
+    if (remotes.length === 0) {
+      return undefined;
+    }
 
     const saved = context.workspaceState.get<string>(ACTIVE_REMOTE_KEY);
     if (saved && remotes.some((r) => r.name === saved)) {
@@ -122,9 +187,15 @@ export function activate(context: vscode.ExtensionContext) {
         workingGroup = undefined;
         secondaryGroup = undefined;
       }
-      if (remoteStatusBar) remoteStatusBar.hide();
-      if (statusBar) statusBar.hide();
-      if (syncStatusBar) syncStatusBar.hide();
+      if (remoteStatusBar) {
+        remoteStatusBar.hide();
+      }
+      if (statusBar) {
+        statusBar.hide();
+      }
+      if (syncStatusBar) {
+        syncStatusBar.hide();
+      }
       return false;
     }
 
@@ -148,14 +219,24 @@ export function activate(context: vscode.ExtensionContext) {
       syncStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
       syncStatusBar.command = 'jj.sync';
 
-      context.subscriptions.push(scm, conflictsGroup, workingGroup, secondaryGroup, remoteStatusBar, statusBar, syncStatusBar);
+      context.subscriptions.push(
+        scm,
+        conflictsGroup,
+        workingGroup,
+        secondaryGroup,
+        remoteStatusBar,
+        statusBar,
+        syncStatusBar
+      );
     }
 
     return true;
   }
 
   async function refresh() {
-    if (isRefreshing) return;
+    if (isRefreshing) {
+      return;
+    }
     isRefreshing = true;
 
     try {
@@ -165,7 +246,9 @@ export function activate(context: vscode.ExtensionContext) {
       }
 
       const current = await jj.getChangeInfo('@');
-      if (!current) return;
+      if (!current) {
+        return;
+      }
 
       const firstLineCurrent = current.description.split('\n')[0];
       const workingDesc = firstLineCurrent ? `: ${firstLineCurrent}` : '';
@@ -174,7 +257,7 @@ export function activate(context: vscode.ExtensionContext) {
       scm.inputBox.placeholder = `Describe change (${current.changeId}) - press + or run Describe`;
 
       // 1. Remote Component (Placed on the left)
-      const remotes = await jj.getRemotes();
+      const remotes: JJRemoteInfo[] = await jj.getRemotes();
       const activeRemote = await getActiveRemote();
 
       if (remotes.length > 0 && activeRemote) {
@@ -216,7 +299,7 @@ export function activate(context: vscode.ExtensionContext) {
       const targetInspectInfo = targetInspectId === '@' ? current : await jj.getChangeInfo(targetInspectId);
 
       if (targetInspectInfo && targetInspectInfo.isConflict) {
-        const conflictEntries = await jj.getConflictedFiles(targetInspectId);
+        const conflictEntries: JJConflictEntry[] = await jj.getConflictedFiles(targetInspectId);
         if (conflictEntries.length > 0) {
           conflictsGroup.hideWhenEmpty = false;
           conflictsGroup.label = `Conflicts in ${formatHighlightedId(targetInspectInfo)}`;
@@ -254,7 +337,7 @@ export function activate(context: vscode.ExtensionContext) {
       }
 
       const parentInfo = await jj.getChangeInfo('@-');
-      const workingFiles = await jj.getDiffSummary('@');
+      const workingFiles: JJDiffFile[] = await jj.getDiffSummary('@');
       const parentId = parentInfo ? parentInfo.changeId : '@-';
       workingGroup.resourceStates = workingFiles.map((file) =>
         createResourceState(
@@ -276,7 +359,7 @@ export function activate(context: vscode.ExtensionContext) {
         secondaryGroup.label = `Changed in ${formattedId}${desc}`;
 
         const inspectedParent = targetInspectInfo.parentIds[0] || `${targetInspectId}-`;
-        const inspectedFiles = await jj.getDiffSummary(targetInspectId);
+        const inspectedFiles: JJDiffFile[] = await jj.getDiffSummary(targetInspectId);
 
         secondaryGroup.resourceStates = inspectedFiles.map((file) =>
           createResourceState(
@@ -299,7 +382,7 @@ export function activate(context: vscode.ExtensionContext) {
         const grandParentInfo = await jj.getChangeInfo('@--');
         const grandParentId = grandParentInfo ? grandParentInfo.changeId : '@--';
 
-        const parentFiles = await jj.getDiffSummary('@-');
+        const parentFiles: JJDiffFile[] = await jj.getDiffSummary('@-');
         secondaryGroup.resourceStates = parentFiles.map((file) =>
           createResourceState(
             file,
@@ -325,688 +408,34 @@ export function activate(context: vscode.ExtensionContext) {
     }
   }
 
-  function createResourceState(
-    file: JJDiffFile,
-    root: string,
-    fromRev: string,
-    intoRev: string,
-    fromDisplayId: string,
-    intoDisplayId: string,
-    contextValue: string
-  ): JJResourceState {
-    const fileUri = vscode.Uri.file(path.join(root, file.path));
-
-    const stateResourceUri =
-      fromRev === '@'
-        ? fileUri
-        : vscode.Uri.from({
-            scheme: JJ_RESOURCE_SCHEME,
-            path: file.path,
-            query: fromRev,
-          });
-
-    const baseUri = vscode.Uri.from({
-      scheme: JJ_DIFF_SCHEME,
-      path: file.path,
-      query: intoRev,
-    });
-
-    const targetUri =
-      fromRev === '@'
-        ? fileUri
-        : vscode.Uri.from({
-            scheme: JJ_DIFF_SCHEME,
-            path: file.path,
-            query: fromRev,
-          });
-
-    const fileName = path.basename(file.path);
-    let title = `${fileName} (${fromDisplayId} vs ${intoDisplayId})`;
-    let leftUri = baseUri;
-    let rightUri = targetUri;
-
-    if (file.status === 'A') {
-      title = `${fileName} (Added in ${fromDisplayId})`;
-      leftUri = baseUri.with({ path: 'empty-file' });
-    } else if (file.status === 'D') {
-      title = `${fileName} (Deleted in ${fromDisplayId})`;
-      rightUri = baseUri.with({ path: 'empty-file' });
-    }
-
-    return {
-      resourceUri: stateResourceUri,
-      contextValue,
-      fromRev,
-      intoRev,
-      relativePath: file.path,
-      decorations: {
-        strikeThrough: file.status === 'D',
-        tooltip: `Status: ${file.status} (${fromDisplayId})`,
-      },
-      command: {
-        title: 'Open Diff',
-        command: 'vscode.diff',
-        arguments: [leftUri, rightUri, title],
-      },
-    };
-  }
-
-  // --- Commands ---
-
-  const selectRemoteCmd = vscode.commands.registerCommand('jj.selectRemote', async () => {
-    try {
-      const remotes = await jj.getRemotes();
-      if (remotes.length === 0) {
-        vscode.window.showInformationMessage('No remotes configured in this repository.');
-        return;
-      }
-
-      const active = await getActiveRemote();
-      const picks = remotes.map((r) => ({
-        label: r.name === active ? `$(check) ${r.name}` : r.name,
-        description: r.url,
-        remoteName: r.name,
-      }));
-
-      const selected = await vscode.window.showQuickPick(picks, {
-        placeHolder: 'Select active remote for synchronization and graph filtering',
-      });
-
-      if (!selected) return;
-
-      await context.workspaceState.update(ACTIVE_REMOTE_KEY, selected.remoteName);
-      vscode.window.showInformationMessage(`Active remote set to '${selected.remoteName}'.`);
-      await refresh();
-    } catch (err: any) {
-      vscode.window.showErrorMessage(err.message);
-    }
+  const conflictDisposables = registerConflictCommands(jj, rootPath, refresh);
+  const generalDisposables = registerGeneralCommands({
+    context,
+    jj,
+    rootPath,
+    getScm: () => scm,
+    getSelectedCommitId: () => selectedCommitId,
+    setSelectedCommitId: (id) => {
+      selectedCommitId = id;
+    },
+    getActiveRemote,
+    refresh,
   });
-
-  const openMultiDiffCmd = vscode.commands.registerCommand(
-    'jj.openMultiDiff',
-    async (targetRev?: string) => {
-      try {
-        const rev = typeof targetRev === 'string' ? targetRev : (selectedCommitId || '@');
-        const info = await jj.getChangeInfo(rev);
-        if (!info) return;
-
-        const parentRev = info.parentIds[0] || `${rev}-`;
-        const diffFiles = await jj.getDiffSummary(rev);
-
-        if (diffFiles.length === 0) {
-          vscode.window.showInformationMessage(`No file changes in commit ${info.changeId}.`);
-          return;
-        }
-
-        const resources: [vscode.Uri, vscode.Uri | undefined, vscode.Uri | undefined][] = diffFiles.map((file) => {
-          const fileUri = vscode.Uri.file(path.join(rootPath, file.path));
-
-          let originalUri: vscode.Uri | undefined = vscode.Uri.from({
-            scheme: JJ_DIFF_SCHEME,
-            path: file.path,
-            query: parentRev,
-          });
-
-          let modifiedUri: vscode.Uri | undefined =
-            rev === '@'
-              ? fileUri
-              : vscode.Uri.from({
-                  scheme: JJ_DIFF_SCHEME,
-                  path: file.path,
-                  query: rev,
-                });
-
-          if (file.status === 'A') {
-            originalUri = undefined;
-          } else if (file.status === 'D') {
-            modifiedUri = undefined;
-          }
-
-          return [fileUri, originalUri, modifiedUri];
-        });
-
-        const title = `Changes in ${info.changeId}${info.description ? ` (${info.description.split('\n')[0]})` : ''}`;
-        await vscode.commands.executeCommand('vscode.changes', title, resources);
-      } catch (err: any) {
-        vscode.window.showErrorMessage(`Failed to open multi-diff editor: ${err.message}`);
-      }
-    }
-  );
-
-  const addRemoteCmd = vscode.commands.registerCommand('jj.addRemote', async () => {
-    try {
-      const name = await vscode.window.showInputBox({
-        prompt: 'Enter remote name',
-        placeHolder: 'e.g. origin, upstream',
-        validateInput: (v) => (!v || !v.trim() ? 'Name required' : null),
-      });
-      if (!name) return;
-
-      const url = await vscode.window.showInputBox({
-        prompt: `Enter URL for remote '${name.trim()}'`,
-        placeHolder: 'git@github.com:user/repo.git or https://...',
-        validateInput: (v) => (!v || !v.trim() ? 'URL required' : null),
-      });
-      if (!url) return;
-
-      await jj.addRemote(name.trim(), url.trim());
-      await context.workspaceState.update(ACTIVE_REMOTE_KEY, name.trim());
-      vscode.window.showInformationMessage(`Added and activated remote '${name.trim()}'.`);
-      await refresh();
-    } catch (err: any) {
-      vscode.window.showErrorMessage(err.message);
-    }
-  });
-
-  const removeRemoteCmd = vscode.commands.registerCommand(
-    'jj.removeRemote',
-    async (item?: JJRemoteTreeItem) => {
-      try {
-        let name = item?.remote?.name;
-        if (!name) {
-          const remotes = await jj.getRemotes();
-          if (remotes.length === 0) {
-            vscode.window.showInformationMessage('No remotes found.');
-            return;
-          }
-          const pick = await vscode.window.showQuickPick(remotes.map((r) => r.name), {
-            placeHolder: 'Select remote to remove',
-          });
-          if (!pick) return;
-          name = pick;
-        }
-
-        const confirm = await vscode.window.showWarningMessage(
-          `Remove git remote '${name}'?`,
-          { modal: true },
-          'Remove'
-        );
-        if (confirm === 'Remove') {
-          await jj.removeRemote(name);
-          const active = await getActiveRemote();
-          if (active === name) {
-            await context.workspaceState.update(ACTIVE_REMOTE_KEY, undefined);
-          }
-          vscode.window.showInformationMessage(`Removed remote '${name}'.`);
-          await refresh();
-        }
-      } catch (err: any) {
-        vscode.window.showErrorMessage(err.message);
-      }
-    }
-  );
-
-  const openConflictResolverCmd = vscode.commands.registerCommand(
-    'jj.openConflictResolver',
-    async (fileUri: vscode.Uri, revision: string) => {
-      try {
-        const filePath = vscode.workspace.asRelativePath(fileUri);
-        const fullPath = path.join(rootPath, filePath);
-
-        const fileContent = await fs.readFile(fullPath, 'utf8').catch(() => '');
-        const hasTextMarkers = fileContent.includes('<<<<<<<') || fileContent.includes('>>>>>>>');
-
-        const conflicts = await jj.getConflictedFiles(revision);
-        const entry = conflicts.find((c) => c.path === filePath);
-
-        if (entry && entry.isDeletion && !hasTextMarkers) {
-          const choice = await vscode.window.showInformationMessage(
-            `'${path.basename(filePath)}' is in conflict: one branch deleted this file, while another branch modified/kept it.`,
-            'Keep File',
-            'Delete File',
-            'Inspect Content'
-          );
-
-          if (choice === 'Keep File') {
-            await jj.resolveConflict(filePath, revision, 'keep');
-            vscode.window.showInformationMessage(`Resolved: Kept '${path.basename(filePath)}'.`);
-            await refresh();
-            return;
-          } else if (choice === 'Delete File') {
-            await jj.resolveConflict(filePath, revision, 'delete');
-            vscode.window.showInformationMessage(`Resolved: Deleted '${path.basename(filePath)}'.`);
-            await refresh();
-            return;
-          } else if (choice === 'Inspect Content') {
-            const doc = await vscode.workspace.openTextDocument(fileUri);
-            await vscode.window.showTextDocument(doc, { preview: false });
-            return;
-          }
-          return;
-        }
-
-        await vscode.window.withProgress(
-          {
-            location: vscode.ProgressLocation.Notification,
-            title: 'Close the merge conflict resolver when done',
-            cancellable: false,
-          },
-          async () => {
-            await jj.runNativeMerge(filePath);
-          }
-        );
-
-        await refresh();
-      } catch {
-        const doc = await vscode.workspace.openTextDocument(fileUri);
-        await vscode.window.showTextDocument(doc, { preview: false });
-      }
-    }
-  );
-
-  const resolveConflictFileCmd = vscode.commands.registerCommand(
-    'jj.resolveConflict',
-    async (resource: JJResourceState) => {
-      if (!resource || !resource.relativePath) return;
-
-      try {
-        const filePath = resource.relativePath;
-        const targetRev = resource.fromRev || '@';
-        const fullPath = path.join(rootPath, filePath);
-
-        const text = await fs.readFile(fullPath, 'utf8').catch(() => '');
-        const hasTextMarkers = text.includes('<<<<<<<') || text.includes('%%%%%%%') || text.includes('>>>>>>>');
-
-        const conflicts = await jj.getConflictedFiles(targetRev);
-        const entry = conflicts.find((c) => c.path === filePath);
-
-        if (entry && entry.isDeletion && !hasTextMarkers) {
-          const choice = await vscode.window.showQuickPick(
-            [
-              { label: '$(check) Keep File', action: 'keep', description: 'Retain the file and its current contents' },
-              { label: '$(trash) Delete File', action: 'delete', description: 'Confirm deletion of the file' },
-            ],
-            { placeHolder: `Resolve deletion conflict for ${path.basename(filePath)}` }
-          );
-
-          if (!choice) return;
-          await jj.resolveConflict(filePath, targetRev, choice.action as 'keep' | 'delete');
-          vscode.window.showInformationMessage(`Resolved conflict for '${path.basename(filePath)}'.`);
-          await refresh();
-          return;
-        }
-
-        if (hasTextMarkers) {
-          const proceed = await vscode.window.showWarningMessage(
-            `'${path.basename(filePath)}' still contains conflict markers (<<<<<<< / >>>>>>>). Mark as resolved anyway?`,
-            'Mark Resolved',
-            'Cancel'
-          );
-          if (proceed !== 'Mark Resolved') return;
-        }
-
-        await jj.resolveConflict(filePath, targetRev, 'content');
-        vscode.window.showInformationMessage(`Marked '${path.basename(filePath)}' as resolved in ${targetRev}.`);
-        await refresh();
-      } catch (err: any) {
-        vscode.window.showErrorMessage(err.message);
-      }
-    }
-  );
-
-  const squashConflictFileCmd = vscode.commands.registerCommand(
-    'jj.squashConflictFile',
-    async (resource: JJResourceState) => {
-      if (!resource || !resource.relativePath) return;
-      try {
-        const filePath = resource.relativePath;
-        const targetRev = resource.fromRev || '@';
-        const targetInfo = await jj.getChangeInfo(targetRev);
-        const parentRev = targetInfo?.parentIds[0] || `${targetRev}-`;
-
-        await jj.moveFile(targetRev, parentRev, filePath);
-        vscode.window.showInformationMessage(`Squashed '${path.basename(filePath)}' into ${parentRev}.`);
-        await refresh();
-      } catch (err: any) {
-        vscode.window.showErrorMessage(`Failed to squash conflicted file: ${err.message}`);
-      }
-    }
-  );
-
-  const selectCommitCmd = vscode.commands.registerCommand(
-    'jj.selectCommit',
-    async (arg?: string | any) => {
-      const changeId = typeof arg === 'string' ? arg : undefined;
-      selectedCommitId = changeId === selectedCommitId ? undefined : changeId;
-      await refresh();
-    }
-  );
-
-  const newChangeCmd = vscode.commands.registerCommand('jj.new', async () => {
-    try {
-      if (scm && scm.inputBox.value.trim().length > 0) {
-        const desc = scm.inputBox.value.trim();
-        await jj.describeChange(desc, '@');
-        scm.inputBox.value = '';
-        await jj.newChange();
-      } else {
-        const current = await jj.getChangeInfo('@');
-        if (current && current.empty && !current.description) {
-          const parent = await jj.getChangeInfo('@-');
-          if (parent) {
-            await jj.abandonChange('@');
-            await jj.newChange(parent.changeId);
-          } else {
-            await jj.newChange();
-          }
-        } else {
-          await jj.newChange();
-        }
-      }
-      selectedCommitId = undefined;
-      await refresh();
-    } catch (err: any) {
-      vscode.window.showErrorMessage(err.message);
-    }
-  });
-
-  const createBookmarkCmd = vscode.commands.registerCommand(
-    'jj.createBookmark',
-    async (arg?: string | any) => {
-      try {
-        let rev: string | undefined;
-        if (typeof arg === 'string') {
-          rev = arg;
-        } else if (arg && typeof arg === 'object') {
-          rev = arg.fromRev || arg.changeId || arg.revision;
-        }
-        if (!rev) {
-          rev = selectedCommitId || '@';
-        }
-
-        const info = await jj.getChangeInfo(rev);
-        const promptTarget = info ? `${info.changeId}` : rev;
-
-        const name = await vscode.window.showInputBox({
-          prompt: `Create bookmark on ${promptTarget}`,
-          placeHolder: 'e.g. main, feature/auth, v0.1',
-          validateInput: (val) => {
-            if (!val || !val.trim()) return 'Bookmark name cannot be empty';
-            if (/\s/.test(val)) return 'Bookmark name cannot contain spaces';
-            return null;
-          },
-        });
-
-        if (!name) return;
-
-        await jj.createBookmark(name.trim(), rev);
-        vscode.window.showInformationMessage(`Created bookmark '${name.trim()}' on ${promptTarget}`);
-        await refresh();
-      } catch (err: any) {
-        vscode.window.showErrorMessage(err.message);
-      }
-    }
-  );
-
-  // Directly pulls from active remote and pushes ahead bookmark without interactive prompts
-  const syncCmd = vscode.commands.registerCommand('jj.sync', async () => {
-    const remote = await getActiveRemote();
-    if (!remote) {
-      vscode.window.showInformationMessage('No active remote configured.');
-      return;
-    }
-
-    try {
-      await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: `Syncing with ${remote}...` },
-        async () => {
-          await jj.fetchRemote(remote);
-          const status = await jj.getSyncStatus(remote);
-          if (status && status.ahead > 0 && status.bookmark !== '(none)') {
-            await jj.advanceAndPushBookmark(status.bookmark, remote);
-          }
-        }
-      );
-      await refresh();
-    } catch (err: any) {
-      vscode.window.showErrorMessage(`Sync error: ${err.message}`);
-    }
-  });
-
-  const fetchCmd = vscode.commands.registerCommand('jj.fetch', async () => {
-    const remote = await getActiveRemote();
-    if (!remote) return;
-
-    try {
-      await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: `Fetching from ${remote}...` },
-        async () => {
-          await jj.fetchRemote(remote);
-        }
-      );
-      await refresh();
-    } catch (err: any) {
-      vscode.window.showErrorMessage(err.message);
-    }
-  });
-
-  const describeWorkingCmd = vscode.commands.registerCommand('jj.describeWorking', async () => {
-    const info = await jj.getChangeInfo('@');
-    if (!info) return;
-
-    const inputBox = vscode.window.createInputBox();
-    inputBox.title = `JJ: Describe Working Copy (${info.changeId})`;
-    inputBox.value = info.description;
-    inputBox.onDidAccept(async () => {
-      const text = inputBox.value;
-      inputBox.hide();
-      await jj.describeChange(text, '@');
-      await refresh();
-    });
-    inputBox.show();
-  });
-
-  const describeParentCmd = vscode.commands.registerCommand('jj.describeParent', async () => {
-    const info = await jj.getChangeInfo(selectedCommitId || '@-');
-    if (!info) return;
-
-    const inputBox = vscode.window.createInputBox();
-    inputBox.title = `JJ: Describe Change (${info.changeId})`;
-    inputBox.value = info.description;
-    inputBox.onDidAccept(async () => {
-      const text = inputBox.value;
-      inputBox.hide();
-      await jj.describeChange(text, info.changeId);
-      await refresh();
-    });
-    inputBox.show();
-  });
-
-  const describeCmd = vscode.commands.registerCommand('jj.describe', async () => {
-    vscode.commands.executeCommand('jj.describeWorking');
-  });
-
-  const squashWorkingGroupCmd = vscode.commands.registerCommand('jj.squashWorking', async () => {
-    try {
-      await jj.squashAll('@', '@-');
-      await refresh();
-    } catch (err: any) {
-      vscode.window.showErrorMessage(err.message);
-    }
-  });
-
-  const squashParentGroupCmd = vscode.commands.registerCommand('jj.squashParent', async () => {
-    try {
-      const target = selectedCommitId || '@-';
-      const targetInfo = await jj.getChangeInfo(target);
-      const parent = targetInfo?.parentIds[0] || `${target}-`;
-      await jj.squashAll(target, parent);
-      await refresh();
-    } catch (err: any) {
-      vscode.window.showErrorMessage(err.message);
-    }
-  });
-
-  const squashFileCmd = vscode.commands.registerCommand(
-    'jj.squashFile',
-    async (resource: JJResourceState) => {
-      if (!resource || !resource.relativePath) return;
-      try {
-        await jj.moveFile(resource.fromRev, resource.intoRev, resource.relativePath);
-        await refresh();
-      } catch (err: any) {
-        vscode.window.showErrorMessage(err.message);
-      }
-    }
-  );
-
-  const moveFileToWorkingCmd = vscode.commands.registerCommand(
-    'jj.moveFileToWorking',
-    async (resource: JJResourceState) => {
-      if (!resource || !resource.relativePath) return;
-      try {
-        await jj.moveFile(resource.fromRev, '@', resource.relativePath);
-        await refresh();
-      } catch (err: any) {
-        vscode.window.showErrorMessage(err.message);
-      }
-    }
-  );
-
-  const openFileCmd = vscode.commands.registerCommand(
-    'jj.openFile',
-    async (resource: JJResourceState) => {
-      if (!resource || !resource.relativePath) return;
-      try {
-        if (resource.fromRev === '@') {
-          const doc = await vscode.workspace.openTextDocument(
-            vscode.Uri.file(path.join(rootPath, resource.relativePath))
-          );
-          await vscode.window.showTextDocument(doc);
-        } else {
-          const revUri = vscode.Uri.from({
-            scheme: JJ_DIFF_SCHEME,
-            path: resource.relativePath,
-            query: resource.fromRev,
-          });
-          const doc = await vscode.workspace.openTextDocument(revUri);
-          await vscode.window.showTextDocument(doc);
-        }
-      } catch (err: any) {
-        vscode.window.showErrorMessage(`Failed to open file: ${err.message}`);
-      }
-    }
-  );
-
-  const revertFileCmd = vscode.commands.registerCommand(
-    'jj.revertFile',
-    async (resource: JJResourceState) => {
-      if (!resource || !resource.relativePath) return;
-
-      const fileName = path.basename(resource.relativePath);
-      const isWorkingCopy = resource.fromRev === '@';
-      const promptMsg = isWorkingCopy
-        ? `Are you sure you want to discard changes in '${fileName}'?`
-        : `Revert '${fileName}'? Changes will be placed into your working copy.`;
-
-      const confirm = await vscode.window.showWarningMessage(promptMsg, { modal: true }, 'Revert File');
-      if (confirm !== 'Revert File') return;
-
-      try {
-        if (isWorkingCopy) {
-          await jj.restoreFile('@', '@-', resource.relativePath);
-        } else {
-          await jj.restoreFile('@', resource.intoRev, resource.relativePath);
-        }
-        await refresh();
-      } catch (err: any) {
-        vscode.window.showErrorMessage(err.message);
-      }
-    }
-  );
-
-  const switchBookmarkCmd = vscode.commands.registerCommand('jj.switchBookmark', async () => {
-    try {
-      const activeRemote = await getActiveRemote();
-      const bookmarks = await jj.getBookmarks(activeRemote);
-      if (bookmarks.length === 0) {
-        vscode.window.showInformationMessage('No bookmarks found.');
-        return;
-      }
-      const selected = await vscode.window.showQuickPick(bookmarks, {
-        placeHolder: activeRemote
-          ? `Select bookmark for remote '${activeRemote}' to switch to (e.g. main, new-bookmark@${activeRemote})`
-          : 'Select bookmark to switch to (e.g. main, @-)',
-      });
-      if (selected) {
-        await jj.switchBookmark(selected);
-        selectedCommitId = undefined;
-        await refresh();
-      }
-    } catch (err: any) {
-      vscode.window.showErrorMessage(err.message);
-    }
-  });
-
-  const editCmd = vscode.commands.registerCommand('jj.edit', async () => {
-    try {
-      const targetRev = await vscode.window.showInputBox({
-        prompt: 'Enter revision or change ID to edit',
-        placeHolder: 'e.g. k, main, new-bookmark@local, @-',
-      });
-      if (targetRev) {
-        await jj.editChange(targetRev.trim());
-        selectedCommitId = undefined;
-        await refresh();
-      }
-    } catch (err: any) {
-      vscode.window.showErrorMessage(err.message);
-    }
-  });
-
-  const rebaseCmd = vscode.commands.registerCommand('jj.rebase', async () => {
-    try {
-      const source = await vscode.window.showInputBox({
-        prompt: 'Revision to rebase (source)',
-        value: selectedCommitId || '@',
-      });
-      if (!source) return;
-
-      const destination = await vscode.window.showInputBox({
-        prompt: `Destination revision for ${source}`,
-        placeHolder: 'e.g. main, new-bookmark@local, @-',
-      });
-      if (!destination) return;
-
-      await jj.rebaseSubtree(source.trim(), destination.trim());
-      selectedCommitId = undefined;
-      await refresh();
-    } catch (err: any) {
-      vscode.window.showErrorMessage(err.message);
-    }
-  });
-
-  const convergeCmd = vscode.commands.registerCommand('jj.converge', async (target?: string) => {
-    try {
-      const targetRev =
-        target ||
-        (await vscode.window.showInputBox({
-          prompt: 'Enter revision or change ID to converge',
-          value: selectedCommitId || '',
-          placeHolder: 'e.g. k, change_id(...)',
-        }));
-      if (targetRev) {
-        await jj.converge(targetRev.trim());
-        vscode.window.showInformationMessage(`Converged divergent changes for '${targetRev.trim()}'.`);
-        await refresh();
-      }
-    } catch (err: any) {
-      vscode.window.showErrorMessage(`Failed to converge: ${err.message}`);
-    }
-  });
-
-  const refreshCmd = vscode.commands.registerCommand('jj.refresh', () => refresh());
 
   const workspaceWatcher = vscode.workspace.createFileSystemWatcher('**/*');
   const fileFilter = (uri: vscode.Uri) => {
-    if (!uri.fsPath.includes('/.jj/')) triggerRefresh();
+    if (!uri.fsPath.includes('/.jj/')) {
+      triggerRefresh();
+    }
   };
   workspaceWatcher.onDidChange(fileFilter);
   workspaceWatcher.onDidCreate(fileFilter);
   workspaceWatcher.onDidDelete(fileFilter);
 
   vscode.workspace.onDidSaveTextDocument((doc) => {
-    if (!doc.uri.fsPath.includes('/.jj/')) triggerRefresh(100);
+    if (!doc.uri.fsPath.includes('/.jj/')) {
+      triggerRefresh(100);
+    }
   });
 
   const jjOpWatcher = vscode.workspace.createFileSystemWatcher('**/.jj/repo/op_heads/*');
@@ -1015,32 +444,8 @@ export function activate(context: vscode.ExtensionContext) {
   jjOpWatcher.onDidDelete(() => triggerRefresh());
 
   context.subscriptions.push(
-    refreshCmd,
-    selectRemoteCmd,
-    openMultiDiffCmd,
-    addRemoteCmd,
-    removeRemoteCmd,
-    openConflictResolverCmd,
-    resolveConflictFileCmd,
-    squashConflictFileCmd,
-    selectCommitCmd,
-    createBookmarkCmd,
-    syncCmd,
-    fetchCmd,
-    describeWorkingCmd,
-    describeParentCmd,
-    squashWorkingGroupCmd,
-    squashParentGroupCmd,
-    squashFileCmd,
-    moveFileToWorkingCmd,
-    openFileCmd,
-    revertFileCmd,
-    newChangeCmd,
-    describeCmd,
-    switchBookmarkCmd,
-    editCmd,
-    rebaseCmd,
-    convergeCmd,
+    ...conflictDisposables,
+    ...generalDisposables,
     workspaceWatcher,
     jjOpWatcher
   );
