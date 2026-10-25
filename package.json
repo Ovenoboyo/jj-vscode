@@ -1,13 +1,20 @@
 {
-  "name": "jj",
-  "displayName": "jj",
+  "name": "simple-jj",
+  "displayName": "Simple JJ",
   "description": "Jujutsu SCM extension for VS Code with interactive graph, remote manager, and multi-diff inspection",
-  "version": "0.0.1",
+  "version": "0.0.3",
+  "publisher": "ovenoboyo",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ovenoboyo/jj-vscode.git"
+  },
+  "icon": "resources/icon.png",
+  "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Source Control"
+    "SCM Providers"
   ],
   "activationEvents": [
     "onView:workbench.scm",
@@ -49,6 +56,12 @@
         "category": "JJ",
         "title": "Open Unified Multi-Diff for Selected Commit",
         "icon": "$(diff-multiple)"
+      },
+      {
+        "command": "jj.splitCommit",
+        "category": "JJ",
+        "title": "Split Commit",
+        "icon": "$(split-vertical)"
       },
       {
         "command": "jj.addRemote",
@@ -95,7 +108,7 @@
       {
         "command": "jj.describe",
         "category": "JJ",
-        "title": "Describe Working Copy",
+        "title": "Describe Change",
         "icon": "$(edit)"
       },
       {
@@ -157,6 +170,12 @@
         "category": "JJ",
         "title": "Revert Changes",
         "icon": "$(discard)"
+      },
+      {
+        "command": "jj.moveParentToWorking",
+        "category": "JJ",
+        "title": "Move to Working Copy",
+        "icon": "$(arrow-up)"
       },
       {
         "command": "jj.moveFileToWorking",
@@ -240,12 +259,29 @@
         {
           "command": "jj.describeParent",
           "group": "inline@1",
-          "when": "scmProvider == jj && scmResourceGroup == parent"
+          "when": "scmProvider == jj && (scmResourceGroup == parent || scmResourceGroup == secondary)"
+        },
+        {
+          "command": "jj.moveParentToWorking",
+          "group": "inline@2",
+          "when": "scmProvider == jj && (scmResourceGroup == parent || scmResourceGroup == secondary)"
         },
         {
           "command": "jj.squashParent",
+          "group": "inline@3",
+          "when": "scmProvider == jj && (scmResourceGroup == parent || scmResourceGroup == secondary)"
+        }
+      ],
+      "scm/resourceFolder/context": [
+        {
+          "command": "jj.moveFileToWorking",
+          "group": "inline@1",
+          "when": "scmProvider == jj && scmResourceGroup != working"
+        },
+        {
+          "command": "jj.squashFile",
           "group": "inline@2",
-          "when": "scmProvider == jj && scmResourceGroup == parent"
+          "when": "scmProvider == jj"
         }
       ],
       "scm/resourceState/context": [
@@ -294,19 +330,22 @@
     "pretest": "pnpm run compile-tests && pnpm run compile && pnpm run lint",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
+    "package-vsix": "npx --yes @vscode/vsce package --no-dependencies",
+    "install-extension": "pnpm run package-vsix && code --install-extension simple-jj-0.0.2.vsix --force",
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "24.x",
-    "typescript-eslint": "^8.61.1",
-    "eslint": "^10.5.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0",
+    "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.28.1",
+    "eslint": "^10.5.0",
     "npm-run-all": "^4.1.5",
     "typescript": "^6.0.3",
-    "@vscode/test-cli": "^0.0.15",
-    "@vscode/test-electron": "^3.0.0"
+    "typescript-eslint": "^8.61.1"
   },
   "overrides": {
     "diff": "^8.0.4",

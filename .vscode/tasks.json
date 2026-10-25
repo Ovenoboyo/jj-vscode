@@ -59,6 +59,20 @@
 				"npm: watch-tests"
 			],
 			"problemMatcher": []
+		},
+		{
+			"label": "Install Extension Locally",
+			"type": "shell",
+			"command": "pnpm run install-extension",
+			"problemMatcher": [],
+			"group": "none"
+		},
+		{
+			"label": "Package Extension (VSIX)",
+			"type": "shell",
+			"command": "pnpm run package-vsix",
+			"problemMatcher": [],
+			"group": "none"
 		}
 	]
 }
