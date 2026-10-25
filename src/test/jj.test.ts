@@ -4,7 +4,8 @@ import * as os from 'os';
 import * as fs from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { JJRunner } from '../jj';
+import { JJRunner, parseDiffSummaryLine, normalizeDiffPath, JJDiffFile } from '../jj';
+import { filterFilesWithDiff } from '../diffUtils';
 
 const execFileAsync = promisify(execFile);
 
@@ -188,5 +189,279 @@ suite('JJ SCM Test Suite', function () {
     assert.strictEqual(divergentAfter.length, 0, 'Divergence should be resolved after converge');
 
     await fs.rm(cloneDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  test('parseDiffSummaryLine handles standard and renamed files', () => {
+    assert.deepStrictEqual(parseDiffSummaryLine('M src/main.rs'), {
+      status: 'M',
+      path: 'src/main.rs',
+    });
+
+    assert.deepStrictEqual(parseDiffSummaryLine('A src/new.rs'), {
+      status: 'A',
+      path: 'src/new.rs',
+    });
+
+    assert.deepStrictEqual(parseDiffSummaryLine('D src/old.rs'), {
+      status: 'D',
+      path: 'src/old.rs',
+    });
+
+    assert.deepStrictEqual(
+      parseDiffSummaryLine('R src/hooks/{extensions_test.rs => registries_test.rs}'),
+      {
+        status: 'R',
+        path: 'src/hooks/registries_test.rs',
+        oldPath: 'src/hooks/extensions_test.rs',
+      }
+    );
+
+    assert.deepStrictEqual(parseDiffSummaryLine('R {foo.txt => bar.txt}'), {
+      status: 'R',
+      path: 'bar.txt',
+      oldPath: 'foo.txt',
+    });
+
+    assert.deepStrictEqual(
+      parseDiffSummaryLine('R {src/hooks/extensions_test.rs => other/registries_test.rs}'),
+      {
+        status: 'R',
+        path: 'other/registries_test.rs',
+        oldPath: 'src/hooks/extensions_test.rs',
+      }
+    );
+
+    assert.deepStrictEqual(
+      parseDiffSummaryLine('R src/{hooks => newhooks}/test.rs'),
+      {
+        status: 'R',
+        path: 'src/newhooks/test.rs',
+        oldPath: 'src/hooks/test.rs',
+      }
+    );
+
+    assert.deepStrictEqual(
+      parseDiffSummaryLine('R old.txt => new.txt'),
+      {
+        status: 'R',
+        path: 'new.txt',
+        oldPath: 'old.txt',
+      }
+    );
+  });
+
+  test('getDiffSummary properly parses renames in a repository', async () => {
+    const hooksDir = path.join(tempDir, 'src', 'hooks');
+    await fs.mkdir(hooksDir, { recursive: true });
+    const oldFile = path.join(hooksDir, 'extensions_test.rs');
+    await fs.writeFile(oldFile, '// test content\n');
+
+    await jj.describeChange('Add extensions test');
+    await runCmd('jj', ['new'], tempDir);
+
+    const newFile = path.join(hooksDir, 'registries_test.rs');
+    await fs.rename(oldFile, newFile);
+
+    const diff = await jj.getDiffSummary('@');
+    const renamed = diff.find((f) => f.path === 'src/hooks/registries_test.rs');
+
+    assert.ok(renamed, 'Should find renamed file by its new path');
+    assert.strictEqual(renamed.status, 'R');
+    assert.strictEqual(renamed.oldPath, 'src/hooks/extensions_test.rs');
+  });
+
+  test('splitCommit splits commit and assigns files and descriptions accurately', async () => {
+    await jj.newChange();
+    const fileA = path.join(tempDir, 'split_a.txt');
+    const fileB = path.join(tempDir, 'split_b.txt');
+    await fs.writeFile(fileA, 'content a\n');
+    await fs.writeFile(fileB, 'content b\n');
+    await jj.describeChange('Combined feature with A and B');
+
+    // Split split_a.txt into new commit with description 'Part A only'
+    await jj.splitCommit('@', 'Part A only', ['split_a.txt']);
+
+    // Check parent commit (@-): should contain split_a.txt and description 'Part A only'
+    const parentInfo = await jj.getChangeInfo('@-');
+    assert.ok(parentInfo, 'Parent commit should exist');
+    assert.strictEqual(parentInfo.description, 'Part A only');
+
+    const parentDiff = await jj.getDiffSummary('@-');
+    assert.ok(parentDiff.some((f) => f.path === 'split_a.txt'), 'Parent should contain split_a.txt');
+    assert.ok(!parentDiff.some((f) => f.path === 'split_b.txt'), 'Parent should not contain split_b.txt');
+
+    // Check current commit (@): should keep remaining split_b.txt and original description
+    const currentInfo = await jj.getChangeInfo('@');
+    assert.ok(currentInfo, 'Current commit should exist');
+    assert.strictEqual(currentInfo.description, 'Combined feature with A and B');
+
+    const currentDiff = await jj.getDiffSummary('@');
+    assert.ok(currentDiff.some((f) => f.path === 'split_b.txt'), 'Current should contain split_b.txt');
+    assert.ok(!currentDiff.some((f) => f.path === 'split_a.txt'), 'Current should not contain split_a.txt');
+  });
+
+  test('getCommitGraph places current branch and its branches first before other bookmarks', async () => {
+    // Create an other branch with bookmark 'other-feature' and 3 commits
+    await jj.newChange('main@origin');
+    await jj.describeChange('Other branch commit 1');
+    await jj.createBookmark('other-feature');
+    await jj.newChange('@');
+    await jj.describeChange('Other branch commit 2');
+    await jj.newChange('@');
+    await jj.describeChange('Other branch commit 3');
+
+    // Now create and switch to 'active-work' branch
+    await jj.newChange('main@origin');
+    await jj.describeChange('Active branch commit 1');
+    await jj.createBookmark('active-work');
+
+    // Ensure working copy is on active-work branch
+    const graph = await jj.getCommitGraph('origin');
+
+    // The first commit in the graph must belong to the active branch or working copy, not other-feature
+    assert.ok(graph.length > 0, 'Graph must not be empty');
+    assert.strictEqual(
+      graph[0].description,
+      'Active branch commit 1',
+      'Current branch commit should appear first in the graph'
+    );
+
+    // Other branch commits must show up after the current branch
+    const activeIdx = graph.findIndex((c) => c.description === 'Active branch commit 1');
+    const otherIdx = graph.findIndex((c) => c.description === 'Other branch commit 3');
+    assert.ok(activeIdx !== -1, 'Active branch commit must exist in graph');
+    assert.ok(otherIdx !== -1, 'Other branch commit must exist in graph');
+    assert.ok(activeIdx < otherIdx, 'Current branch commits must appear before other bookmarks');
+  });
+
+  test('filterFilesWithDiff filters out files with no actual diff', async () => {
+    await jj.newChange();
+    const testFile = path.join(tempDir, 'identical.txt');
+    await fs.writeFile(testFile, 'base content\n');
+    await jj.describeChange('Base content commit');
+
+    await jj.newChange();
+    // Simulate diff summary reporting M for identical.txt even though content is identical
+    const fakeDiff: JJDiffFile[] = [
+      { status: 'M', path: 'identical.txt' },
+      { status: 'A', path: 'real_addition.txt' },
+    ];
+
+    const fileA = path.join(tempDir, 'real_addition.txt');
+    await fs.writeFile(fileA, 'addition\n');
+
+    const filtered = await filterFilesWithDiff(fakeDiff, '@', '@-', tempDir, jj);
+
+    assert.strictEqual(filtered.length, 1, 'Should filter out identical file');
+    assert.strictEqual(filtered[0].path, 'real_addition.txt');
+  });
+
+  test('getCommitGraph limits to at most 3 branches and excludes distant branches', async () => {
+    // Current branch is on active-work
+    // Create branch 1 close to active-work
+    await jj.newChange('main@origin');
+    await jj.describeChange('Branch 1 commit');
+    await jj.createBookmark('branch-1');
+
+    // Create branch 2 close to active-work
+    await jj.newChange('main@origin');
+    await jj.describeChange('Branch 2 commit');
+    await jj.createBookmark('branch-2');
+
+    // Create branch 3 close to active-work - should be excluded by 3-branch limit
+    await jj.newChange('main@origin');
+    await jj.describeChange('Branch 3 commit');
+    await jj.createBookmark('branch-3');
+
+    // Create branch-distant (>10 commits away)
+    await jj.newChange('main@origin');
+    for (let i = 0; i < 11; i++) {
+      await jj.newChange('@');
+      await jj.describeChange(`Distant commit ${i}`);
+    }
+    await jj.createBookmark('branch-distant');
+
+    // Switch back to active-work
+    await jj.editChange('active-work');
+
+    const graph = await jj.getCommitGraph('origin');
+    const descriptions = graph.map((c) => c.description);
+
+    // Active branch must be present
+    assert.ok(descriptions.includes('Active branch commit 1'));
+    // Branch-distant must NOT be present (> 10 commits away)
+    assert.ok(!descriptions.includes('Distant commit 10'));
+    assert.ok(!graph.some((c) => c.bookmarks.includes('branch-distant')));
+
+    // Only at most 2 other branches should be present (3 branches total)
+    const otherBookmarks = ['branch-1', 'branch-2', 'branch-3'].filter((b) =>
+      graph.some((c) => c.bookmarks.includes(b))
+    );
+    assert.ok(otherBookmarks.length <= 2, `Should have at most 2 other branches in graph, got ${otherBookmarks.length}`);
+  });
+
+  test('moveFile moves whole directory between revisions', async () => {
+    await jj.newChange();
+    const dirPath = path.join(tempDir, 'subfolder');
+    await fs.mkdir(dirPath, { recursive: true });
+    await fs.writeFile(path.join(dirPath, 'file1.txt'), 'content 1\n');
+    await fs.writeFile(path.join(dirPath, 'file2.txt'), 'content 2\n');
+    await jj.describeChange('Commit with subfolder');
+
+    // Create new change on top
+    await jj.newChange();
+    // Move subfolder from @- into @
+    await jj.moveFile('@-', '@', 'subfolder');
+
+    const diff = await jj.getDiffSummary('@');
+    const paths = diff.map((d) => d.path);
+    assert.ok(paths.includes('subfolder/file1.txt'));
+    assert.ok(paths.includes('subfolder/file2.txt'));
+  });
+
+  test('working copy appears right above the commit it is on with sibling branches preceding working copy', async () => {
+    // Create base commit P
+    await jj.newChange('main@origin');
+    await jj.describeChange('Base parent commit P');
+
+    // Create sibling branch B off P
+    await jj.newChange('@');
+    await jj.describeChange('Sibling branch B');
+
+    // Create working copy WC off P
+    await jj.newChange('@-');
+    await jj.describeChange('Working copy WC');
+
+    const graph = await jj.getCommitGraph('origin');
+    const idxB = graph.findIndex((c) => c.description === 'Sibling branch B');
+    const idxWC = graph.findIndex((c) => c.description === 'Working copy WC');
+    const idxP = graph.findIndex((c) => c.description === 'Base parent commit P');
+
+    assert.ok(idxB !== -1, 'Sibling branch B must be in graph');
+    assert.ok(idxWC !== -1, 'Working copy WC must be in graph');
+    assert.ok(idxP !== -1, 'Base parent commit P must be in graph');
+
+    // In top-to-bottom graph order: B precedes WC, and WC immediately precedes P (idxP === idxWC + 1)
+    assert.ok(idxB < idxWC, 'Sibling branch B should appear above working copy in topological sort');
+    assert.strictEqual(idxP, idxWC + 1, 'Working copy must appear right above parent commit P');
+  });
+
+  test('branches at least 10 commits behind main are hidden', async () => {
+    // Create an old branch
+    await jj.newChange('main@origin');
+    await jj.describeChange('Old branch commit');
+    await jj.createBookmark('old-branch');
+
+    // Advance main by 11 commits ahead of old-branch
+    await jj.switchBookmark('main@origin');
+    for (let i = 1; i <= 11; i++) {
+      await jj.newChange('@');
+      await jj.describeChange(`Advancing main ${i}`);
+    }
+    await jj.setBookmark('main', '@');
+
+    const graph = await jj.getCommitGraph('origin');
+    const oldBranchCommit = graph.find((c) => c.description === 'Old branch commit');
+    assert.strictEqual(oldBranchCommit, undefined, 'Old branch should be hidden when >= 10 commits behind main');
   });
 });

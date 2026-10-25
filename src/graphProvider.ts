@@ -28,6 +28,10 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
         await vscode.commands.executeCommand('jj.selectCommit', message.changeId);
       } else if (message.command === 'openMultiDiff') {
         await vscode.commands.executeCommand('jj.openMultiDiff', message.changeId);
+      } else if (message.command === 'describeCommit') {
+        await vscode.commands.executeCommand('jj.describe', message.changeId);
+      } else if (message.command === 'splitCommit') {
+        await vscode.commands.executeCommand('jj.splitCommit', message.changeId);
       } else if (message.command === 'editCommit') {
         try {
           await this.jj.editChange(message.changeId);

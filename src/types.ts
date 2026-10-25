@@ -17,6 +17,7 @@ export interface JJChangeInfo {
 export interface JJDiffFile {
   status: 'M' | 'A' | 'D' | 'R' | string;
   path: string;
+  oldPath?: string;
 }
 
 export interface RemoteSyncStatus {
@@ -48,4 +49,5 @@ export interface JJResourceState extends vscode.SourceControlResourceState {
   fromRev: string;
   intoRev: string;
   relativePath: string;
+  oldRelativePath?: string;
 }

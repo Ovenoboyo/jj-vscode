@@ -16,6 +16,49 @@ import {
   JJRemoteInfo,
 } from './types';
 
+export function normalizeDiffPath(raw: string): string {
+  const collapsed = raw.replace(/\/+/g, '/');
+  return collapsed.replace(/^(\.\/|\/)+/, '').replace(/\/+$/, '');
+}
+
+export function parseDiffSummaryLine(line: string): JJDiffFile {
+  const trimmed = line.trim();
+  const firstSpace = trimmed.indexOf(' ');
+  const status = firstSpace !== -1 ? trimmed.slice(0, firstSpace).trim() : trimmed.slice(0, 1);
+  const rawPath = (firstSpace !== -1 ? trimmed.slice(firstSpace + 1) : trimmed.slice(1)).trim();
+
+  // Match brace rename pattern: prefix{old => new}suffix
+  const braceMatch = rawPath.match(/^(.*?)\{(.*?)\s*=>\s*(.*?)\}(.*)$/);
+  if (braceMatch) {
+    const [, prefix, oldPart, newPart, suffix] = braceMatch;
+    const oldPath = normalizeDiffPath(`${prefix}${oldPart}${suffix}`);
+    const newPath = normalizeDiffPath(`${prefix}${newPart}${suffix}`);
+    return {
+      status,
+      path: newPath,
+      oldPath,
+    };
+  }
+
+  // Match arrow pattern without braces: old => new
+  const arrowMatch = rawPath.match(/^(.*?)\s*=>\s*(.*)$/);
+  if (arrowMatch) {
+    const [, oldPart, newPart] = arrowMatch;
+    const oldPath = normalizeDiffPath(oldPart);
+    const newPath = normalizeDiffPath(newPart);
+    return {
+      status,
+      path: newPath,
+      oldPath,
+    };
+  }
+
+  return {
+    status,
+    path: normalizeDiffPath(rawPath),
+  };
+}
+
 export class JJRunner {
   constructor(private readonly workspaceRoot: string) {}
 
@@ -45,7 +88,7 @@ export class JJRunner {
     env.GIT_TERMINAL_PROMPT = '0';
 
     return new Promise((resolve, reject) => {
-      const child = execFile('jj', ['--color=never', ...args], {
+      const child = execFile('jj', ['--color=never', '--config=ui.paginate="never"', ...args], {
         cwd: this.workspaceRoot,
         env,
       }, (err: any, stdout: string, stderr: string) => {
@@ -148,11 +191,7 @@ export class JJRunner {
         .split('\n')
         .map((line) => line.trim())
         .filter(Boolean)
-        .map((line) => {
-          const status = line.slice(0, 1);
-          const filePath = line.slice(1).trim();
-          return { status, path: filePath };
-        });
+        .map((line) => parseDiffSummaryLine(line));
     } catch {
       return [];
     }
@@ -170,12 +209,12 @@ export class JJRunner {
     await this.run(['squash', '-u', '--from', fromRev, '--into', intoRev]);
   }
 
-  async moveFile(fromRev: string, intoRev: string, filePath: string): Promise<void> {
-    await this.run(['squash', '-u', '--from', fromRev, '--into', intoRev, filePath]);
+  async moveFile(fromRev: string, intoRev: string, ...filePaths: string[]): Promise<void> {
+    await this.run(['squash', '-u', '--from', fromRev, '--into', intoRev, ...filePaths]);
   }
 
-  async restoreFile(toRev: string, fromRev: string, filePath: string): Promise<void> {
-    await this.run(['restore', '--to', toRev, '--from', fromRev, filePath]);
+  async restoreFile(toRev: string, fromRev: string, ...filePaths: string[]): Promise<void> {
+    await this.run(['restore', '--to', toRev, '--from', fromRev, ...filePaths]);
   }
 
   async getBookmarks(targetRemote?: string): Promise<string[]> {
@@ -439,11 +478,21 @@ export class JJRunner {
     let fallbackRevset = `(::(visible_heads() | @ | divergent())) ~ root()`;
 
     try {
+      const hasTrunk = await this.run(['log', '--ignore-working-copy', '-r', 'trunk()', '--no-graph', '-T', 'commit_id']).catch(() => '');
+      const trunkRef = hasTrunk.trim().length > 0 ? 'trunk()' : (remoteRefExpr || '@');
+      const distantAncestors = `::(parents(roots(ancestors(${trunkRef} | @, 10))) ~ root())`;
+      revset = `(${revset}) ~ (${distantAncestors})`;
+      fallbackRevset = `(${fallbackRevset}) ~ (${distantAncestors})`;
+    } catch {
+      // Ignore errors
+    }
+
+    try {
       const otherHeadsRaw = await this.run([
         'log',
         '--ignore-working-copy',
         '-r',
-        'heads((visible_heads() | bookmarks() | remote_bookmarks()) ~ (::@ | @::))',
+        `heads((visible_heads() | bookmarks() | ${remoteRefExpr}) ~ (::@ | @::))`,
         '--no-graph',
         '-T',
         'commit_id ++ "\\n"',
@@ -451,27 +500,52 @@ export class JJRunner {
 
       const otherHeads = otherHeadsRaw.trim().split('\n').filter(Boolean);
       if (otherHeads.length > 0) {
-        const excludedHeads: string[] = [];
+        const headDistances: { headId: string; distance: number; tooFar: boolean }[] = [];
         await Promise.all(
           otherHeads.map(async (headId) => {
-            const countRaw = await this.run([
-              'log',
-              '--ignore-working-copy',
-              '-r',
-              `::((visible_heads() | @) & (::@ | @::)) ~ ::${headId}`,
-              '--no-graph',
-              '-T',
-              'change_id.short() ++ "\\n"',
-            ]).catch(() => '');
-            const aheadCount = countRaw.trim().split('\n').filter(Boolean).length;
-            if (aheadCount > 10) {
-              excludedHeads.push(headId);
-            }
+            const [aheadRaw, branchRaw] = await Promise.all([
+              this.run([
+                'log',
+                '--ignore-working-copy',
+                '-r',
+                `::((visible_heads() | @) & (::@ | @::)) ~ ::${headId}`,
+                '--no-graph',
+                '-T',
+                'change_id.short() ++ "\\n"',
+              ]).catch(() => ''),
+              this.run([
+                'log',
+                '--ignore-working-copy',
+                '-r',
+                `::${headId} ~ (::@ | @::)`,
+                '--no-graph',
+                '-T',
+                'change_id.short() ++ "\\n"',
+              ]).catch(() => ''),
+            ]);
+
+            const aheadCount = aheadRaw.trim().split('\n').filter(Boolean).length;
+            const branchCount = branchRaw.trim().split('\n').filter(Boolean).length;
+            const distance = aheadCount + branchCount;
+            const tooFar = aheadCount > 10 || branchCount > 10 || distance > 10;
+            headDistances.push({ headId, distance, tooFar });
           })
         );
 
+        // Sort candidates within 10 commits by recency (order in otherHeads from jj log)
+        const validCandidates = headDistances
+          .filter((h) => !h.tooFar)
+          .sort((a, b) => otherHeads.indexOf(a.headId) - otherHeads.indexOf(b.headId));
+
+        // Limit graph to at most 3 branches total (1 current branch + at most 2 other branches)
+        const allowedHeads = new Set(validCandidates.slice(0, 2).map((h) => h.headId));
+
+        const excludedHeads = headDistances
+          .filter((h) => !allowedHeads.has(h.headId))
+          .map((h) => h.headId);
+
         if (excludedHeads.length > 0) {
-          const excludeExpr = excludedHeads.map((h) => `(::${h} ~ ::@)`).join(' | ');
+          const excludeExpr = excludedHeads.map((h) => `(::${h} ~ (::@ | @::))`).join(' | ');
           revset = `(${revset}) ~ (${excludeExpr})`;
           fallbackRevset = `(${fallbackRevset}) ~ (${excludeExpr})`;
         }
@@ -599,6 +673,147 @@ export class JJRunner {
         getDepth(id);
       }
 
+      // Build descendants and ancestors of current (@)
+      const currentInfo = await this.getChangeInfo('@').catch(() => null);
+      const currentCommitId = currentInfo?.commitId;
+
+      const descendantsOfCurrent = new Set<string>();
+      if (currentCommitId && knownIds.has(currentCommitId)) {
+        const queue = [currentCommitId];
+        while (queue.length > 0) {
+          const curr = queue.shift()!;
+          const children = childrenMap.get(curr) || [];
+          for (const ch of children) {
+            if (!descendantsOfCurrent.has(ch)) {
+              descendantsOfCurrent.add(ch);
+              queue.push(ch);
+            }
+          }
+        }
+      }
+
+      const ancestorsOfCurrent = new Set<string>();
+      if (currentCommitId && knownIds.has(currentCommitId)) {
+        const queue = [currentCommitId];
+        while (queue.length > 0) {
+          const curr = queue.shift()!;
+          const item = itemMap.get(curr);
+          if (item) {
+            for (const p of item.parentIds) {
+              if (!ancestorsOfCurrent.has(p)) {
+                ancestorsOfCurrent.add(p);
+                queue.push(p);
+              }
+            }
+          }
+        }
+      }
+
+      const activeBookmark = await this.getActiveBookmark(targetRemote).catch(() => null);
+      const cleanActiveBm = activeBookmark ? (activeBookmark.includes('@') ? activeBookmark.split('@')[0] : activeBookmark) : null;
+
+      function hasBlockedDirectParent(headId: string): boolean {
+        if (!currentCommitId) {return false;}
+        if (headId === currentCommitId || descendantsOfCurrent.has(headId)) {return false;}
+
+        const currentItem = itemMap.get(currentCommitId);
+        if (!currentItem) {return false;}
+
+        // Direct parents of working copy where childCount > 1 (other sibling branches are waiting)
+        const blockedParents = new Set<string>();
+        for (const pId of currentItem.parentIds) {
+          if ((childCount.get(pId) || 0) > 1) {
+            blockedParents.add(pId);
+          }
+        }
+
+        if (blockedParents.size === 0) {return false;}
+
+        // Check if headId reaches any blocked direct parent without passing through working copy
+        const q = [headId];
+        const visited = new Set<string>();
+        while (q.length > 0) {
+          const curr = q.shift()!;
+          if (blockedParents.has(curr)) {return true;}
+          if (curr === currentCommitId || descendantsOfCurrent.has(curr)) {continue;}
+          visited.add(curr);
+          const it = itemMap.get(curr);
+          if (it) {
+            for (const p of it.parentIds) {
+              if (!visited.has(p)) {q.push(p);}
+            }
+          }
+        }
+        return false;
+      }
+
+      function reachesOtherBookmark(headId: string): boolean {
+        const visited = new Set<string>();
+        const q = [headId];
+        while (q.length > 0) {
+          const curr = q.shift()!;
+          if (visited.has(curr)) {continue;}
+          visited.add(curr);
+          if (curr !== headId && (curr === currentCommitId || ancestorsOfCurrent.has(curr))) {
+            continue;
+          }
+          const it = itemMap.get(curr);
+          if (!it) {continue;}
+          const hasOther = it.bookmarks.some((b) => b !== cleanActiveBm) ||
+            it.remoteBookmarks.some((rb) => cleanActiveBm ? !rb.startsWith(`${cleanActiveBm}@`) : true);
+          if (hasOther) {
+            return true;
+          }
+          for (const p of it.parentIds) {
+            if (!visited.has(p)) {q.push(p);}
+          }
+        }
+        return false;
+      }
+
+      // Priority categorization:
+      // 4: Sibling branches of working copy's parent (emitted first so working copy sits right above parent)
+      // 3: Current branch main head (@ or descendant of @)
+      // 2: Branches of the current branch (side branches/sub-branches branching from current branch)
+      // 1: All other bookmarks / branches
+      function getHeadPriority(headId: string): number {
+        if (!currentCommitId) {return 1;}
+
+        if (reachesOtherBookmark(headId)) {
+          return 1;
+        }
+
+        if (hasBlockedDirectParent(headId)) {
+          return 4;
+        }
+
+        if (headId === currentCommitId || descendantsOfCurrent.has(headId)) {
+          return 3;
+        }
+
+        let reachesCurrentBranch = false;
+        const visited = new Set<string>();
+        const q = [headId];
+        while (q.length > 0) {
+          const curr = q.shift()!;
+          if (curr === currentCommitId || descendantsOfCurrent.has(curr) || ancestorsOfCurrent.has(curr)) {
+            reachesCurrentBranch = true;
+            break;
+          }
+          visited.add(curr);
+          const it = itemMap.get(curr);
+          if (it) {
+            for (const p of it.parentIds) {
+              if (!visited.has(p)) {
+                q.push(p);
+              }
+            }
+          }
+        }
+
+        return reachesCurrentBranch ? 2 : 1;
+      }
+
       // Ready heads (commits with 0 children)
       const ready: string[] = [];
       for (const [id, count] of childCount.entries()) {
@@ -622,10 +837,11 @@ export class JJRunner {
             }
           }
 
-          // 2. If direct parent is waiting for sibling children, prioritize ready nodes that lead to it
+          // 2. If direct parent is waiting for sibling children, prioritize ready nodes that lead to it.
+          // Prioritize non-working-copy siblings first so working copy is emitted last among siblings.
           if (bestIdx === -1) {
             for (const pId of lastItem.parentIds) {
-              const sibIdx = ready.findIndex((rId) => {
+              function leadsToParent(rId: string): boolean {
                 const visited = new Set<string>();
                 function hasAncestor(curr: string): boolean {
                   if (curr === pId) {return true;}
@@ -636,7 +852,13 @@ export class JJRunner {
                   return it.parentIds.some((p) => hasAncestor(p));
                 }
                 return hasAncestor(rId);
-              });
+              }
+
+              const isWcNode = (rId: string) => rId === currentCommitId || descendantsOfCurrent.has(rId);
+              let sibIdx = ready.findIndex((rId) => leadsToParent(rId) && !isWcNode(rId));
+              if (sibIdx === -1) {
+                sibIdx = ready.findIndex((rId) => leadsToParent(rId));
+              }
               if (sibIdx !== -1) {
                 bestIdx = sibIdx;
                 break;
@@ -645,22 +867,27 @@ export class JJRunner {
           }
         }
 
-        // 3. Pick the candidate with the greatest depth (the branch furthest ahead)
-        // Tie-breaker: prioritize bookmarks, non-empty commits, stable commitId
+        // 3. Pick the candidate with highest priority category (current branch first), then greatest depth
         if (bestIdx === -1) {
           bestIdx = 0;
           for (let i = 1; i < ready.length; i++) {
-            const dCurr = depthMap.get(ready[i]) ?? 0;
-            const dBest = depthMap.get(ready[bestIdx]) ?? 0;
-            if (dCurr > dBest) {
+            const pCurr = getHeadPriority(ready[i]);
+            const pBest = getHeadPriority(ready[bestIdx]);
+            if (pCurr > pBest) {
               bestIdx = i;
-            } else if (dCurr === dBest) {
-              const itemCurr = itemMap.get(ready[i])!;
-              const itemBest = itemMap.get(ready[bestIdx])!;
-              const currScore = (itemCurr.bookmarks.length > 0 || itemCurr.remoteBookmarks.length > 0 ? 2 : 0) + (itemCurr.description ? 1 : 0);
-              const bestScore = (itemBest.bookmarks.length > 0 || itemBest.remoteBookmarks.length > 0 ? 2 : 0) + (itemBest.description ? 1 : 0);
-              if (currScore > bestScore) {
+            } else if (pCurr === pBest) {
+              const dCurr = depthMap.get(ready[i]) ?? 0;
+              const dBest = depthMap.get(ready[bestIdx]) ?? 0;
+              if (dCurr > dBest) {
                 bestIdx = i;
+              } else if (dCurr === dBest) {
+                const itemCurr = itemMap.get(ready[i])!;
+                const itemBest = itemMap.get(ready[bestIdx])!;
+                const currScore = (itemCurr.bookmarks.length > 0 || itemCurr.remoteBookmarks.length > 0 ? 2 : 0) + (itemCurr.description ? 1 : 0);
+                const bestScore = (itemBest.bookmarks.length > 0 || itemBest.remoteBookmarks.length > 0 ? 2 : 0) + (itemBest.description ? 1 : 0);
+                if (currScore > bestScore) {
+                  bestIdx = i;
+                }
               }
             }
           }
@@ -722,6 +949,17 @@ export class JJRunner {
 
   async describeChange(message: string, revision: string = '@'): Promise<void> {
     await this.run(['describe', '-r', revision, '-m', message]);
+  }
+
+  async splitCommit(revision: string, description: string, filePaths: string[]): Promise<string> {
+    const args = ['split', '-r', revision];
+    if (description) {
+      args.push('-m', description);
+    } else {
+      args.push('-m', '');
+    }
+    args.push('--', ...filePaths);
+    return await this.run(args);
   }
 
   async editChange(revision: string): Promise<void> {

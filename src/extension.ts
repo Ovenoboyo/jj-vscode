@@ -11,6 +11,7 @@ import {
   JJ_RESOURCE_SCHEME,
   ACTIVE_REMOTE_KEY,
 } from './commands';
+import { filterFilesWithDiff } from './diffUtils';
 
 class JJContentProvider implements vscode.TextDocumentContentProvider {
   constructor(private readonly jj: JJRunner) {}
@@ -63,7 +64,7 @@ function createResourceState(
 
   const baseUri = vscode.Uri.from({
     scheme: JJ_DIFF_SCHEME,
-    path: file.path,
+    path: file.oldPath || file.path,
     query: intoRev,
   });
 
@@ -87,7 +88,15 @@ function createResourceState(
   } else if (file.status === 'D') {
     title = `${fileName} (Deleted in ${fromDisplayId})`;
     rightUri = baseUri.with({ path: 'empty-file' });
+  } else if (file.status === 'R' && file.oldPath) {
+    const oldFileName = path.basename(file.oldPath);
+    title = `${oldFileName} ➔ ${fileName} (${fromDisplayId} vs ${intoDisplayId})`;
   }
+
+  const tooltip =
+    file.status === 'R' && file.oldPath
+      ? `Status: Renamed from ${file.oldPath} (${fromDisplayId})`
+      : `Status: ${file.status} (${fromDisplayId})`;
 
   return {
     resourceUri: stateResourceUri,
@@ -95,9 +104,10 @@ function createResourceState(
     fromRev,
     intoRev,
     relativePath: file.path,
+    oldRelativePath: file.oldPath,
     decorations: {
       strikeThrough: file.status === 'D',
-      tooltip: `Status: ${file.status} (${fromDisplayId})`,
+      tooltip,
     },
     command: {
       title: 'Open Diff',
@@ -206,7 +216,7 @@ export function activate(context: vscode.ExtensionContext) {
       conflictsGroup.hideWhenEmpty = true;
 
       workingGroup = scm.createResourceGroup('working', 'Working copy');
-      secondaryGroup = scm.createResourceGroup('secondary', 'Parent');
+      secondaryGroup = scm.createResourceGroup('parent', 'Parent');
       secondaryGroup.hideWhenEmpty = false;
 
       // Status Bar Ordering: Remote (left: priority 100), Bookmark (priority 99), Sync (priority 98)
@@ -337,8 +347,9 @@ export function activate(context: vscode.ExtensionContext) {
       }
 
       const parentInfo = await jj.getChangeInfo('@-');
-      const workingFiles: JJDiffFile[] = await jj.getDiffSummary('@');
       const parentId = parentInfo ? parentInfo.changeId : '@-';
+      const rawWorkingFiles: JJDiffFile[] = await jj.getDiffSummary('@');
+      const workingFiles = await filterFilesWithDiff(rawWorkingFiles, '@', parentId, rootPath, jj);
       workingGroup.resourceStates = workingFiles.map((file) =>
         createResourceState(
           file,
@@ -359,7 +370,8 @@ export function activate(context: vscode.ExtensionContext) {
         secondaryGroup.label = `Changed in ${formattedId}${desc}`;
 
         const inspectedParent = targetInspectInfo.parentIds[0] || `${targetInspectId}-`;
-        const inspectedFiles: JJDiffFile[] = await jj.getDiffSummary(targetInspectId);
+        const rawInspectedFiles: JJDiffFile[] = await jj.getDiffSummary(targetInspectId);
+        const inspectedFiles = await filterFilesWithDiff(rawInspectedFiles, targetInspectId, inspectedParent, rootPath, jj);
 
         secondaryGroup.resourceStates = inspectedFiles.map((file) =>
           createResourceState(
@@ -382,7 +394,8 @@ export function activate(context: vscode.ExtensionContext) {
         const grandParentInfo = await jj.getChangeInfo('@--');
         const grandParentId = grandParentInfo ? grandParentInfo.changeId : '@--';
 
-        const parentFiles: JJDiffFile[] = await jj.getDiffSummary('@-');
+        const rawParentFiles: JJDiffFile[] = await jj.getDiffSummary('@-');
+        const parentFiles = await filterFilesWithDiff(rawParentFiles, '@-', grandParentId, rootPath, jj);
         secondaryGroup.resourceStates = parentFiles.map((file) =>
           createResourceState(
             file,
@@ -438,6 +451,24 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
 
+  const docChangeSub = vscode.workspace.onDidChangeTextDocument((e) => {
+    if (!e.document.uri.fsPath.includes('/.jj/')) {
+      triggerRefresh(150);
+    }
+  });
+
+  const docCloseSub = vscode.workspace.onDidCloseTextDocument((doc) => {
+    if (!doc.uri.fsPath.includes('/.jj/')) {
+      triggerRefresh(150);
+    }
+  });
+
+  const editorChangeSub = vscode.window.onDidChangeActiveTextEditor((editor) => {
+    if (editor && !editor.document.uri.fsPath.includes('/.jj/')) {
+      triggerRefresh(150);
+    }
+  });
+
   const jjOpWatcher = vscode.workspace.createFileSystemWatcher('**/.jj/repo/op_heads/*');
   jjOpWatcher.onDidChange(() => triggerRefresh());
   jjOpWatcher.onDidCreate(() => triggerRefresh());
@@ -447,7 +478,10 @@ export function activate(context: vscode.ExtensionContext) {
     ...conflictDisposables,
     ...generalDisposables,
     workspaceWatcher,
-    jjOpWatcher
+    jjOpWatcher,
+    docChangeSub,
+    docCloseSub,
+    editorChangeSub
   );
 
   refresh();

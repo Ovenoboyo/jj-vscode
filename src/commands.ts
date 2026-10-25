@@ -3,6 +3,8 @@ import * as path from 'path';
 import { JJRunner } from './jj';
 import { JJResourceState, JJDiffFile, JJRemoteInfo } from './types';
 import { JJRemoteTreeItem } from './remotesProvider';
+import { JJSplitCommitPanel } from './splitPanel';
+import { filterFilesWithDiff } from './diffUtils';
 
 export const JJ_DIFF_SCHEME = 'jj-diff';
 export const JJ_RESOURCE_SCHEME = 'jj-resource';
@@ -73,7 +75,8 @@ export function registerGeneralCommands(deps: CommandDependencies): vscode.Dispo
         }
 
         const parentRev = info.parentIds[0] || `${rev}-`;
-        const diffFiles: JJDiffFile[] = await jj.getDiffSummary(rev);
+        const rawDiffFiles: JJDiffFile[] = await jj.getDiffSummary(rev);
+        const diffFiles = await filterFilesWithDiff(rawDiffFiles, rev, parentRev, rootPath, jj);
 
         if (diffFiles.length === 0) {
           vscode.window.showInformationMessage(`No file changes in commit ${info.changeId}.`);
@@ -85,7 +88,7 @@ export function registerGeneralCommands(deps: CommandDependencies): vscode.Dispo
 
           let originalUri: vscode.Uri | undefined = vscode.Uri.from({
             scheme: JJ_DIFF_SCHEME,
-            path: file.path,
+            path: file.oldPath || file.path,
             query: parentRev,
           });
 
@@ -310,44 +313,41 @@ export function registerGeneralCommands(deps: CommandDependencies): vscode.Dispo
     }
   });
 
-  const describeWorkingCmd = vscode.commands.registerCommand('jj.describeWorking', async () => {
-    const info = await jj.getChangeInfo('@');
-    if (!info) {
-      return;
-    }
+  const describeCmd = vscode.commands.registerCommand('jj.describe', async (targetRev?: string) => {
+    try {
+      const rev = typeof targetRev === 'string' ? targetRev : (getSelectedCommitId() || '@');
+      const info = await jj.getChangeInfo(rev);
+      if (!info) {
+        return;
+      }
 
-    const inputBox = vscode.window.createInputBox();
-    inputBox.title = `JJ: Describe Working Copy (${info.changeId})`;
-    inputBox.value = info.description;
-    inputBox.onDidAccept(async () => {
-      const text = inputBox.value;
-      inputBox.hide();
-      await jj.describeChange(text, '@');
-      await refresh();
-    });
-    inputBox.show();
+      const inputBox = vscode.window.createInputBox();
+      inputBox.title = `JJ: Describe Change (${info.changeId})`;
+      inputBox.value = info.description;
+      inputBox.prompt = 'Enter description for this change';
+      inputBox.onDidAccept(async () => {
+        const text = inputBox.value;
+        inputBox.hide();
+        try {
+          await jj.describeChange(text, info.changeId);
+          await refresh();
+        } catch (err: any) {
+          vscode.window.showErrorMessage(`Failed to describe change: ${err.message}`);
+        }
+      });
+      inputBox.show();
+    } catch (err: any) {
+      vscode.window.showErrorMessage(`Failed to describe change: ${err.message}`);
+    }
+  });
+
+  const describeWorkingCmd = vscode.commands.registerCommand('jj.describeWorking', async () => {
+    await vscode.commands.executeCommand('jj.describe', '@');
   });
 
   const describeParentCmd = vscode.commands.registerCommand('jj.describeParent', async () => {
-    const info = await jj.getChangeInfo(getSelectedCommitId() || '@-');
-    if (!info) {
-      return;
-    }
-
-    const inputBox = vscode.window.createInputBox();
-    inputBox.title = `JJ: Describe Change (${info.changeId})`;
-    inputBox.value = info.description;
-    inputBox.onDidAccept(async () => {
-      const text = inputBox.value;
-      inputBox.hide();
-      await jj.describeChange(text, info.changeId);
-      await refresh();
-    });
-    inputBox.show();
-  });
-
-  const describeCmd = vscode.commands.registerCommand('jj.describe', async () => {
-    vscode.commands.executeCommand('jj.describeWorking');
+    const target = getSelectedCommitId() || '@-';
+    await vscode.commands.executeCommand('jj.describe', target);
   });
 
   const squashWorkingGroupCmd = vscode.commands.registerCommand('jj.squashWorking', async () => {
@@ -371,14 +371,93 @@ export function registerGeneralCommands(deps: CommandDependencies): vscode.Dispo
     }
   });
 
+  function extractPathsAndRevs(
+    resource: any,
+    extraArgs: any[]
+  ): { paths: string[]; fromRev?: string; intoRev?: string; isWorkingGroup?: boolean } {
+    const items = [resource, ...extraArgs].filter(Boolean);
+    const paths: string[] = [];
+    let fromRev: string | undefined;
+    let intoRev: string | undefined;
+    let isWorkingGroup = false;
+
+    for (const item of items) {
+      if (item.relativePath) {
+        paths.push(item.relativePath);
+        if (item.oldRelativePath) {
+          paths.push(item.oldRelativePath);
+        }
+        if (item.fromRev) {
+          fromRev = item.fromRev;
+        }
+        if (item.intoRev) {
+          intoRev = item.intoRev;
+        }
+      } else {
+        let uri: vscode.Uri | undefined;
+        if (item instanceof vscode.Uri) {
+          uri = item;
+        } else if (item.resourceUri instanceof vscode.Uri) {
+          uri = item.resourceUri;
+        } else if (item.uri instanceof vscode.Uri) {
+          uri = item.uri;
+        }
+
+        if (uri) {
+          const rel = path.relative(rootPath, uri.fsPath);
+          if (rel && rel !== '.') {
+            paths.push(rel);
+          }
+        }
+
+        if (item.fromRev) {
+          fromRev = item.fromRev;
+        }
+        if (item.intoRev) {
+          intoRev = item.intoRev;
+        }
+        if (item.resourceGroup?.id === 'working' || item.id === 'working') {
+          isWorkingGroup = true;
+        }
+      }
+    }
+
+    return { paths: Array.from(new Set(paths)), fromRev, intoRev, isWorkingGroup };
+  }
+
   const squashFileCmd = vscode.commands.registerCommand(
     'jj.squashFile',
-    async (resource: JJResourceState) => {
-      if (!resource || !resource.relativePath) {
+    async (resource: any, ...extraArgs: any[]) => {
+      if (!resource) {
         return;
       }
       try {
-        await jj.moveFile(resource.fromRev, resource.intoRev, resource.relativePath);
+        const { paths, fromRev, intoRev, isWorkingGroup } = extractPathsAndRevs(resource, extraArgs);
+        let srcRev = fromRev;
+        let dstRev = intoRev;
+
+        if (!srcRev || !dstRev) {
+          if (isWorkingGroup || resource.contextValue === 'jjWorkingFileItem') {
+            srcRev = srcRev || '@';
+            dstRev = dstRev || '@-';
+          } else {
+            const target = getSelectedCommitId() || '@-';
+            const targetInfo = await jj.getChangeInfo(target);
+            srcRev = srcRev || target;
+            dstRev = dstRev || targetInfo?.parentIds[0] || `${target}-`;
+          }
+        }
+
+        if (paths.length > 0) {
+          await jj.moveFile(srcRev, dstRev, ...paths);
+        } else if (resource.id === 'working') {
+          await jj.squashAll('@', '@-');
+        } else if (resource.id === 'parent' || resource.id === 'secondary') {
+          const target = getSelectedCommitId() || '@-';
+          const targetInfo = await jj.getChangeInfo(target);
+          const parent = targetInfo?.parentIds[0] || `${target}-`;
+          await jj.squashAll(target, parent);
+        }
         await refresh();
       } catch (err: any) {
         vscode.window.showErrorMessage(err.message);
@@ -388,18 +467,36 @@ export function registerGeneralCommands(deps: CommandDependencies): vscode.Dispo
 
   const moveFileToWorkingCmd = vscode.commands.registerCommand(
     'jj.moveFileToWorking',
-    async (resource: JJResourceState) => {
-      if (!resource || !resource.relativePath) {
+    async (resource: any, ...extraArgs: any[]) => {
+      if (!resource) {
         return;
       }
       try {
-        await jj.moveFile(resource.fromRev, '@', resource.relativePath);
+        const { paths, fromRev } = extractPathsAndRevs(resource, extraArgs);
+        const target = getSelectedCommitId() || '@-';
+        const srcRev = fromRev || target;
+
+        if (paths.length > 0) {
+          await jj.moveFile(srcRev, '@', ...paths);
+        } else if (resource.id === 'parent' || resource.id === 'secondary') {
+          await jj.moveFile(target, '@');
+        }
         await refresh();
       } catch (err: any) {
         vscode.window.showErrorMessage(err.message);
       }
     }
   );
+
+  const moveParentGroupCmd = vscode.commands.registerCommand('jj.moveParentToWorking', async () => {
+    try {
+      const target = getSelectedCommitId() || '@-';
+      await jj.moveFile(target, '@');
+      await refresh();
+    } catch (err: any) {
+      vscode.window.showErrorMessage(err.message);
+    }
+  });
 
   const openFileCmd = vscode.commands.registerCommand(
     'jj.openFile',
@@ -447,10 +544,13 @@ export function registerGeneralCommands(deps: CommandDependencies): vscode.Dispo
       }
 
       try {
+        const pathsToRestore = resource.oldRelativePath
+          ? [resource.relativePath, resource.oldRelativePath]
+          : [resource.relativePath];
         if (isWorkingCopy) {
-          await jj.restoreFile('@', '@-', resource.relativePath);
+          await jj.restoreFile('@', '@-', ...pathsToRestore);
         } else {
-          await jj.restoreFile('@', resource.intoRev, resource.relativePath);
+          await jj.restoreFile('@', resource.intoRev, ...pathsToRestore);
         }
         await refresh();
       } catch (err: any) {
@@ -543,12 +643,25 @@ export function registerGeneralCommands(deps: CommandDependencies): vscode.Dispo
     }
   });
 
+  const splitCommitCmd = vscode.commands.registerCommand(
+    'jj.splitCommit',
+    async (targetRev?: string) => {
+      try {
+        const rev = typeof targetRev === 'string' ? targetRev : (getSelectedCommitId() || '@');
+        await JJSplitCommitPanel.createOrShow(context.extensionUri, jj, rev, refresh);
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`Failed to open split commit panel: ${err.message}`);
+      }
+    }
+  );
+
   const refreshCmd = vscode.commands.registerCommand('jj.refresh', () => refresh());
 
   return [
     refreshCmd,
     selectRemoteCmd,
     openMultiDiffCmd,
+    splitCommitCmd,
     addRemoteCmd,
     removeRemoteCmd,
     selectCommitCmd,
@@ -561,6 +674,7 @@ export function registerGeneralCommands(deps: CommandDependencies): vscode.Dispo
     describeCmd,
     squashWorkingGroupCmd,
     squashParentGroupCmd,
+    moveParentGroupCmd,
     squashFileCmd,
     moveFileToWorkingCmd,
     openFileCmd,

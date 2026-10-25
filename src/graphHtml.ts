@@ -65,14 +65,38 @@ export function getGraphHtml(
 
       const baseCommits = commitList.filter(c => internalParents.get(c.commitId).length === 0);
 
+      const wcCommit = commitList.find(c => c.commitId === currentId) || commitList.find(c => c.workingCopies && c.workingCopies.length > 0) || commitList[0];
+      const primaryId = wcCommit ? wcCommit.commitId : (commitList[0]?.commitId);
+      const visitedMap = new Map();
+      function leadsToPrimary(currId) {
+        if (currId === primaryId) return true;
+        if (visitedMap.has(currId)) return visitedMap.get(currId);
+        visitedMap.set(currId, false);
+        const children = internalChildren.get(currId) || [];
+        const res = children.some(ch => leadsToPrimary(ch));
+        visitedMap.set(currId, res);
+        return res;
+      }
+
+      // Ensure the base ancestor of the primary current branch (working copy) gets lane 0
+      if (commitList.length > 0) {
+        baseCommits.sort((a, b) => {
+          const aLeads = leadsToPrimary(a.commitId);
+          const bLeads = leadsToPrimary(b.commitId);
+          if (aLeads && !bLeads) return -1;
+          if (!aLeads && bLeads) return 1;
+          return 0;
+        });
+      }
+
       // Assign lanes
       const commitLane = new Map();
       let nextLane = 0;
 
-      // Base commits get dedicated lanes (lanes 0, 1, 2...)
-      baseCommits.forEach(bc => {
-        commitLane.set(bc.commitId, nextLane++);
-      });
+      // Primary base commit gets lane 0 so the primary trunk and its forks get lanes 0 and 1
+      if (baseCommits.length > 0) {
+        commitLane.set(baseCommits[0].commitId, nextLane++);
+      }
 
       // Bottom-up lane propagation to primary children
       for (let r = commitList.length - 1; r >= 0; r--) {
@@ -80,8 +104,18 @@ export function getGraphHtml(
         const myLane = commitLane.get(c.commitId) ?? nextLane++;
         commitLane.set(c.commitId, myLane);
 
-        const children = internalChildren.get(c.commitId) || [];
+        const children = (internalChildren.get(c.commitId) || []).slice();
         if (children.length > 0) {
+          // When working copy is on top of a previous commit with sibling branches,
+          // the sibling branch continues on the primary trunk (lane 0 / blue line)
+          // and the working copy branches off as the secondary branch (lane 1 / green line).
+          children.sort((a, b) => {
+            const aLeads = leadsToPrimary(a);
+            const bLeads = leadsToPrimary(b);
+            if (!aLeads && bLeads) return -1;
+            if (aLeads && !bLeads) return 1;
+            return 0;
+          });
           const primaryChild = children[0];
           if (!commitLane.has(primaryChild)) {
             commitLane.set(primaryChild, myLane);
@@ -312,6 +346,22 @@ export function getGraphHtml(
         const sep = document.createElement('div');
         sep.className = 'menu-separator';
         contextMenu.appendChild(sep);
+
+        const describeOpt = document.createElement('div');
+        describeOpt.className = 'menu-item';
+        describeOpt.textContent = 'Describe Change...';
+        describeOpt.onclick = () => {
+          vscode.postMessage({ command: 'describeCommit', changeId: c.changeId });
+        };
+        contextMenu.appendChild(describeOpt);
+
+        const splitOpt = document.createElement('div');
+        splitOpt.className = 'menu-item';
+        splitOpt.textContent = 'Split Commit...';
+        splitOpt.onclick = () => {
+          vscode.postMessage({ command: 'splitCommit', changeId: c.changeId });
+        };
+        contextMenu.appendChild(splitOpt);
 
         const editOpt = document.createElement('div');
         editOpt.className = 'menu-item';
