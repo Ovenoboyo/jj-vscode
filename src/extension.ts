@@ -138,6 +138,7 @@ export function activate(context: vscode.ExtensionContext) {
   let conflictsGroup: vscode.SourceControlResourceGroup | undefined;
   let workingGroup: vscode.SourceControlResourceGroup | undefined;
   let secondaryGroup: vscode.SourceControlResourceGroup | undefined;
+  let inspectedGroup: vscode.SourceControlResourceGroup | undefined;
   let remoteStatusBar: vscode.StatusBarItem | undefined;
   let statusBar: vscode.StatusBarItem | undefined;
   let syncStatusBar: vscode.StatusBarItem | undefined;
@@ -174,14 +175,29 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   let isRefreshing = false;
+  let refreshQueued = false;
   let refreshTimeout: NodeJS.Timeout | undefined;
 
-  function triggerRefresh(delayMs = 200) {
+  function triggerRefresh(delayMs = 50) {
     if (refreshTimeout) {
       clearTimeout(refreshTimeout);
     }
-    refreshTimeout = setTimeout(() => {
-      refresh().catch((err) => outputChannel.appendLine(`Refresh failed: ${err.message}`));
+    refreshTimeout = setTimeout(async () => {
+      if (isRefreshing) {
+        refreshQueued = true;
+        return;
+      }
+      do {
+        refreshQueued = false;
+        isRefreshing = true;
+        try {
+          await refresh();
+        } catch (err: any) {
+          outputChannel.appendLine(`Refresh failed: ${err.message}`);
+        } finally {
+          isRefreshing = false;
+        }
+      } while (refreshQueued);
     }, delayMs);
   }
 
@@ -196,6 +212,7 @@ export function activate(context: vscode.ExtensionContext) {
         conflictsGroup = undefined;
         workingGroup = undefined;
         secondaryGroup = undefined;
+        inspectedGroup = undefined;
       }
       if (remoteStatusBar) {
         remoteStatusBar.hide();
@@ -219,6 +236,9 @@ export function activate(context: vscode.ExtensionContext) {
       secondaryGroup = scm.createResourceGroup('parent', 'Parent');
       secondaryGroup.hideWhenEmpty = false;
 
+      inspectedGroup = scm.createResourceGroup('inspected', 'Inspected commit');
+      inspectedGroup.hideWhenEmpty = true;
+
       // Status Bar Ordering: Remote (left: priority 100), Bookmark (priority 99), Sync (priority 98)
       remoteStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
       remoteStatusBar.command = 'jj.selectRemote';
@@ -234,6 +254,7 @@ export function activate(context: vscode.ExtensionContext) {
         conflictsGroup,
         workingGroup,
         secondaryGroup,
+        inspectedGroup,
         remoteStatusBar,
         statusBar,
         syncStatusBar
@@ -244,18 +265,18 @@ export function activate(context: vscode.ExtensionContext) {
   }
 
   async function refresh() {
-    if (isRefreshing) {
-      return;
-    }
-    isRefreshing = true;
-
     try {
       const ready = await ensureInitialized();
-      if (!ready || !scm || !conflictsGroup || !workingGroup || !secondaryGroup || !remoteStatusBar || !statusBar || !syncStatusBar) {
+      if (!ready || !scm || !conflictsGroup || !workingGroup || !secondaryGroup || !inspectedGroup || !remoteStatusBar || !statusBar || !syncStatusBar) {
         return;
       }
 
-      const current = await jj.getChangeInfo('@');
+      const [current, remotes, activeRemote] = await Promise.all([
+        jj.getChangeInfo('@'),
+        jj.getRemotes(),
+        getActiveRemote(),
+      ]);
+
       if (!current) {
         return;
       }
@@ -266,9 +287,13 @@ export function activate(context: vscode.ExtensionContext) {
 
       scm.inputBox.placeholder = `Describe change (${current.changeId}) - press + or run Describe`;
 
-      // 1. Remote Component (Placed on the left)
-      const remotes: JJRemoteInfo[] = await jj.getRemotes();
-      const activeRemote = await getActiveRemote();
+      // Status bars and parents in parallel
+      const [activeBookmark, syncStatus, parentInfo, targetInspectInfo] = await Promise.all([
+        activeRemote ? jj.getActiveBookmark(activeRemote) : Promise.resolve(null),
+        activeRemote ? jj.getSyncStatus(activeRemote) : Promise.resolve(null),
+        jj.getChangeInfo('@-'),
+        selectedCommitId && selectedCommitId !== current.changeId ? jj.getChangeInfo(selectedCommitId) : Promise.resolve(null),
+      ]);
 
       if (remotes.length > 0 && activeRemote) {
         remoteStatusBar.text = `$(cloud) ${activeRemote}`;
@@ -278,8 +303,6 @@ export function activate(context: vscode.ExtensionContext) {
         remoteStatusBar.hide();
       }
 
-      // 2. Bookmark Component (To the right of the remote component)
-      const activeBookmark = await jj.getActiveBookmark(activeRemote);
       if (activeBookmark) {
         statusBar.text = `$(bookmark) ${activeBookmark}`;
         statusBar.tooltip = `Active Bookmark: ${activeBookmark}\nCommit: ${current.changeId} (${current.commitId})\n\nClick to switch bookmark`;
@@ -288,31 +311,21 @@ export function activate(context: vscode.ExtensionContext) {
         statusBar.hide();
       }
 
-      // 3. Sync Component
-      if (remotes.length > 0 && activeRemote) {
-        const syncStatus = await jj.getSyncStatus(activeRemote);
-        if (syncStatus) {
-          syncStatusBar.text = `$(sync) ↑${syncStatus.ahead} ↓${syncStatus.behind}`;
-          const bLabel = syncStatus.bookmark !== '(none)' ? `on '${syncStatus.bookmark}' ` : '';
-          syncStatusBar.tooltip = `${syncStatus.remote}: ${syncStatus.ahead} unpushed commit(s) in current chain, ${syncStatus.behind} incoming from ${bLabel}${syncStatus.remote}\nClick to pull & push`;
-          syncStatusBar.show();
-        } else {
-          syncStatusBar.hide();
-        }
+      if (remotes.length > 0 && activeRemote && syncStatus) {
+        syncStatusBar.text = `$(sync) ↑${syncStatus.ahead} ↓${syncStatus.behind}`;
+        const bLabel = syncStatus.bookmark !== '(none)' ? `on '${syncStatus.bookmark}' ` : '';
+        syncStatusBar.tooltip = `${syncStatus.remote}: ${syncStatus.ahead} unpushed commit(s) in current chain, ${syncStatus.behind} incoming from ${bLabel}${syncStatus.remote}\nClick to pull & push`;
+        syncStatusBar.show();
       } else {
         syncStatusBar.hide();
       }
 
-      const targetInspectId = selectedCommitId && selectedCommitId !== current.changeId
-        ? selectedCommitId
-        : '@';
-      const targetInspectInfo = targetInspectId === '@' ? current : await jj.getChangeInfo(targetInspectId);
-
-      if (targetInspectInfo && targetInspectInfo.isConflict) {
-        const conflictEntries: JJConflictEntry[] = await jj.getConflictedFiles(targetInspectId);
+      // Conflicts
+      if (current.isConflict) {
+        const conflictEntries: JJConflictEntry[] = await jj.getConflictedFiles('@');
         if (conflictEntries.length > 0) {
           conflictsGroup.hideWhenEmpty = false;
-          conflictsGroup.label = `Conflicts in ${formatHighlightedId(targetInspectInfo)}`;
+          conflictsGroup.label = `Conflicts in ${formatHighlightedId(current)}`;
           conflictsGroup.resourceStates = conflictEntries.map((entry) => {
             const fileUri = vscode.Uri.file(path.join(rootPath, entry.path));
             const tooltipDesc = entry.isDeletion
@@ -322,7 +335,7 @@ export function activate(context: vscode.ExtensionContext) {
             return {
               resourceUri: fileUri,
               contextValue: entry.isDeletion ? 'jjConflictFileDeletionItem' : 'jjConflictFileItem',
-              fromRev: targetInspectId,
+              fromRev: '@',
               intoRev: '@-',
               relativePath: entry.path,
               decorations: {
@@ -333,7 +346,7 @@ export function activate(context: vscode.ExtensionContext) {
               command: {
                 title: 'Resolve Conflict',
                 command: 'jj.openConflictResolver',
-                arguments: [fileUri, targetInspectId],
+                arguments: [fileUri, '@'],
               },
             };
           });
@@ -346,9 +359,12 @@ export function activate(context: vscode.ExtensionContext) {
         conflictsGroup.resourceStates = [];
       }
 
-      const parentInfo = await jj.getChangeInfo('@-');
       const parentId = parentInfo ? parentInfo.changeId : '@-';
-      const rawWorkingFiles: JJDiffFile[] = await jj.getDiffSummary('@');
+      const [rawWorkingFiles, rawParentFiles] = await Promise.all([
+        jj.getDiffSummary('@'),
+        parentInfo ? jj.getDiffSummary('@-') : Promise.resolve([]),
+      ]);
+
       const workingFiles = await filterFilesWithDiff(rawWorkingFiles, '@', parentId, rootPath, jj);
       workingGroup.resourceStates = workingFiles.map((file) =>
         createResourceState(
@@ -362,29 +378,8 @@ export function activate(context: vscode.ExtensionContext) {
         )
       );
 
-      if (targetInspectId !== '@' && targetInspectInfo) {
-        secondaryGroup.hideWhenEmpty = false;
-        const formattedId = formatHighlightedId(targetInspectInfo);
-        const firstLine = targetInspectInfo.description.split('\n')[0];
-        const desc = firstLine ? `: ${firstLine}` : '';
-        secondaryGroup.label = `Changed in ${formattedId}${desc}`;
-
-        const inspectedParent = targetInspectInfo.parentIds[0] || `${targetInspectId}-`;
-        const rawInspectedFiles: JJDiffFile[] = await jj.getDiffSummary(targetInspectId);
-        const inspectedFiles = await filterFilesWithDiff(rawInspectedFiles, targetInspectId, inspectedParent, rootPath, jj);
-
-        secondaryGroup.resourceStates = inspectedFiles.map((file) =>
-          createResourceState(
-            file,
-            rootPath,
-            targetInspectId,
-            inspectedParent,
-            targetInspectInfo.changeId,
-            inspectedParent,
-            'jjParentFileItem'
-          )
-        );
-      } else if (parentInfo) {
+      // Parent group (always shows Parent @- vs @--)
+      if (parentInfo) {
         secondaryGroup.hideWhenEmpty = false;
         const formattedParentId = formatHighlightedId(parentInfo);
         const firstLineParent = parentInfo.description.split('\n')[0];
@@ -394,7 +389,6 @@ export function activate(context: vscode.ExtensionContext) {
         const grandParentInfo = await jj.getChangeInfo('@--');
         const grandParentId = grandParentInfo ? grandParentInfo.changeId : '@--';
 
-        const rawParentFiles: JJDiffFile[] = await jj.getDiffSummary('@-');
         const parentFiles = await filterFilesWithDiff(rawParentFiles, '@-', grandParentId, rootPath, jj);
         secondaryGroup.resourceStates = parentFiles.map((file) =>
           createResourceState(
@@ -412,12 +406,41 @@ export function activate(context: vscode.ExtensionContext) {
         secondaryGroup.resourceStates = [];
       }
 
-      await graphWebviewProvider.refresh(selectedCommitId);
-      remotesProvider.refresh();
+      // Inspected group (3rd section below Parent when commit selected in graph)
+      if (targetInspectInfo && selectedCommitId && selectedCommitId !== current.changeId) {
+        inspectedGroup.hideWhenEmpty = false;
+        const formattedId = formatHighlightedId(targetInspectInfo);
+        const firstLine = targetInspectInfo.description.split('\n')[0];
+        const desc = firstLine ? `: ${firstLine}` : '';
+        inspectedGroup.label = `Changed in ${formattedId}${desc}`;
+
+        const inspectedParent = targetInspectInfo.parentIds[0] || `${selectedCommitId}-`;
+        const rawInspectedFiles: JJDiffFile[] = await jj.getDiffSummary(selectedCommitId);
+        const inspectedFiles = await filterFilesWithDiff(rawInspectedFiles, selectedCommitId, inspectedParent, rootPath, jj);
+
+        const inspectId = selectedCommitId;
+        inspectedGroup.resourceStates = inspectedFiles.map((file) =>
+          createResourceState(
+            file,
+            rootPath,
+            inspectId,
+            inspectedParent,
+            targetInspectInfo.changeId,
+            inspectedParent,
+            'jjInspectedFileItem'
+          )
+        );
+      } else {
+        inspectedGroup.hideWhenEmpty = true;
+        inspectedGroup.resourceStates = [];
+      }
+
+      await Promise.all([
+        graphWebviewProvider.refresh(selectedCommitId),
+        remotesProvider.refresh(),
+      ]);
     } catch (err: any) {
       outputChannel.appendLine(`Refresh error: ${err.message}`);
-    } finally {
-      isRefreshing = false;
     }
   }
 
@@ -438,50 +461,36 @@ export function activate(context: vscode.ExtensionContext) {
   const workspaceWatcher = vscode.workspace.createFileSystemWatcher('**/*');
   const fileFilter = (uri: vscode.Uri) => {
     if (!uri.fsPath.includes('/.jj/')) {
-      triggerRefresh();
+      triggerRefresh(60);
     }
   };
   workspaceWatcher.onDidChange(fileFilter);
   workspaceWatcher.onDidCreate(fileFilter);
   workspaceWatcher.onDidDelete(fileFilter);
 
-  vscode.workspace.onDidSaveTextDocument((doc) => {
+  const saveSub = vscode.workspace.onDidSaveTextDocument((doc) => {
     if (!doc.uri.fsPath.includes('/.jj/')) {
-      triggerRefresh(100);
-    }
-  });
-
-  const docChangeSub = vscode.workspace.onDidChangeTextDocument((e) => {
-    if (!e.document.uri.fsPath.includes('/.jj/')) {
-      triggerRefresh(150);
-    }
-  });
-
-  const docCloseSub = vscode.workspace.onDidCloseTextDocument((doc) => {
-    if (!doc.uri.fsPath.includes('/.jj/')) {
-      triggerRefresh(150);
-    }
-  });
-
-  const editorChangeSub = vscode.window.onDidChangeActiveTextEditor((editor) => {
-    if (editor && !editor.document.uri.fsPath.includes('/.jj/')) {
-      triggerRefresh(150);
+      triggerRefresh(30);
     }
   });
 
   const jjOpWatcher = vscode.workspace.createFileSystemWatcher('**/.jj/repo/op_heads/*');
-  jjOpWatcher.onDidChange(() => triggerRefresh());
-  jjOpWatcher.onDidCreate(() => triggerRefresh());
-  jjOpWatcher.onDidDelete(() => triggerRefresh());
+  jjOpWatcher.onDidChange(() => triggerRefresh(20));
+  jjOpWatcher.onDidCreate(() => triggerRefresh(20));
+  jjOpWatcher.onDidDelete(() => triggerRefresh(20));
+
+  const jjWcWatcher = vscode.workspace.createFileSystemWatcher('**/.jj/working_copy/*');
+  jjWcWatcher.onDidChange(() => triggerRefresh(20));
+  jjWcWatcher.onDidCreate(() => triggerRefresh(20));
+  jjWcWatcher.onDidDelete(() => triggerRefresh(20));
 
   context.subscriptions.push(
     ...conflictDisposables,
     ...generalDisposables,
     workspaceWatcher,
+    saveSub,
     jjOpWatcher,
-    docChangeSub,
-    docCloseSub,
-    editorChangeSub
+    jjWcWatcher
   );
 
   refresh();

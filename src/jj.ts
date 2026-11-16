@@ -913,6 +913,80 @@ export class JJRunner {
     }
   }
 
+  async isGitBackend(): Promise<boolean> {
+    try {
+      await this.run(['git', 'remote', 'list']);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async getFullCommitId(rev: string): Promise<string> {
+    try {
+      return await this.run(['log', '--ignore-working-copy', '-r', rev, '--no-graph', '-T', 'commit_id']);
+    } catch {
+      return '';
+    }
+  }
+
+  async hasFixTools(): Promise<boolean> {
+    try {
+      const output = await this.run(['config', 'list', 'fix.tools']);
+      return output.trim().length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  async fixReachable(rev: string): Promise<string> {
+    return await this.run(['fix', '-s', rev]);
+  }
+
+  async rebaseCommit(rev: string, destinations: string[], subtree: boolean = true): Promise<void> {
+    const args = ['rebase', subtree ? '-s' : '-r', rev];
+    for (const d of destinations) {
+      args.push('-d', d);
+    }
+    await this.run(args);
+  }
+
+  async moveBookmark(name: string, toRev: string): Promise<void> {
+    await this.run(['bookmark', 'set', name, '-r', toRev]);
+  }
+
+  async getBaseRevision(rev: string): Promise<string> {
+    try {
+      const forkPoint = await this.run([
+        'log',
+        '--ignore-working-copy',
+        '-r',
+        `fork_point(trunk() | ${rev})`,
+        '--no-graph',
+        '-T',
+        'change_id.short(4)',
+      ]).catch(() => '');
+
+      if (forkPoint && forkPoint.trim()) {
+        return forkPoint.trim();
+      }
+    } catch {
+      // fallback
+    }
+
+    const parent = await this.run([
+      'log',
+      '--ignore-working-copy',
+      '-r',
+      `${rev}-`,
+      '--no-graph',
+      '-T',
+      'change_id.short(4)',
+    ]).catch(() => '');
+
+    return parent.trim() || `${rev}-`;
+  }
+
   async rebaseExact(sourceRev: string, destinationRev: string): Promise<void> {
     await this.run(['rebase', '-r', sourceRev, '-d', destinationRev]);
   }

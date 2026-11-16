@@ -2,7 +2,7 @@
   "name": "simple-jj",
   "displayName": "Simple JJ",
   "description": "Jujutsu SCM extension for VS Code with interactive graph, remote manager, and multi-diff inspection",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "publisher": "ovenoboyo",
   "repository": {
     "type": "git",
@@ -206,6 +206,78 @@
         "category": "JJ",
         "title": "Squash Conflicted File into Parent",
         "icon": "$(arrow-down)"
+      },
+      {
+        "command": "jj.squashCommit",
+        "category": "JJ",
+        "title": "Squash Commit",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "jj.squashCommitInto",
+        "category": "JJ",
+        "title": "Squash Commit Into...",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "jj.rebaseCommit",
+        "category": "JJ",
+        "title": "Rebase Commit...",
+        "icon": "$(git-merge)"
+      },
+      {
+        "command": "jj.moveBookmarkHere",
+        "category": "JJ",
+        "title": "Move Branch Bookmark Here...",
+        "icon": "$(bookmark)"
+      },
+      {
+        "command": "jj.fixReachable",
+        "category": "JJ",
+        "title": "Fix Reachable Commits",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "jj.newChild",
+        "category": "JJ",
+        "title": "New Child Commit",
+        "icon": "$(plus)"
+      },
+      {
+        "command": "jj.viewDiffToBase",
+        "category": "JJ",
+        "title": "View Diff to Base",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "jj.copyChangeId",
+        "category": "JJ",
+        "title": "Copy Change ID",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "jj.copyCommitHash",
+        "category": "JJ",
+        "title": "Copy Git Commit Hash",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "jj.squashFileInto",
+        "category": "JJ",
+        "title": "Squash File Into...",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "jj.copyPath",
+        "category": "JJ",
+        "title": "Copy Path",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "jj.openDiff",
+        "category": "JJ",
+        "title": "Open Diff",
+        "icon": "$(diff)"
       }
     ],
     "menus": {
@@ -259,17 +331,17 @@
         {
           "command": "jj.describeParent",
           "group": "inline@1",
-          "when": "scmProvider == jj && (scmResourceGroup == parent || scmResourceGroup == secondary)"
+          "when": "scmProvider == jj && (scmResourceGroup == parent || scmResourceGroup == secondary || scmResourceGroup == inspected)"
         },
         {
           "command": "jj.moveParentToWorking",
           "group": "inline@2",
-          "when": "scmProvider == jj && (scmResourceGroup == parent || scmResourceGroup == secondary)"
+          "when": "scmProvider == jj && (scmResourceGroup == parent || scmResourceGroup == secondary || scmResourceGroup == inspected)"
         },
         {
           "command": "jj.squashParent",
           "group": "inline@3",
-          "when": "scmProvider == jj && (scmResourceGroup == parent || scmResourceGroup == secondary)"
+          "when": "scmProvider == jj && (scmResourceGroup == parent || scmResourceGroup == secondary || scmResourceGroup == inspected)"
         }
       ],
       "scm/resourceFolder/context": [
@@ -281,6 +353,31 @@
         {
           "command": "jj.squashFile",
           "group": "inline@2",
+          "when": "scmProvider == jj"
+        },
+        {
+          "command": "jj.revertFile",
+          "group": "inline@3",
+          "when": "scmProvider == jj"
+        },
+        {
+          "command": "jj.squashFile",
+          "group": "2_squash@1",
+          "when": "scmProvider == jj"
+        },
+        {
+          "command": "jj.squashFileInto",
+          "group": "2_squash@2",
+          "when": "scmProvider == jj"
+        },
+        {
+          "command": "jj.revertFile",
+          "group": "3_restore@1",
+          "when": "scmProvider == jj"
+        },
+        {
+          "command": "jj.copyPath",
+          "group": "4_copy@1",
           "when": "scmProvider == jj"
         }
       ],
@@ -308,12 +405,47 @@
         {
           "command": "jj.moveFileToWorking",
           "group": "inline@5",
-          "when": "scmProvider == jj && scmResourceState == jjParentFileItem"
+          "when": "scmProvider == jj && (scmResourceState == jjParentFileItem || scmResourceState == jjInspectedFileItem)"
         },
         {
           "command": "jj.squashFile",
           "group": "inline@6",
-          "when": "scmProvider == jj && (scmResourceState == jjWorkingFileItem || scmResourceState == jjParentFileItem)"
+          "when": "scmProvider == jj && (scmResourceState == jjWorkingFileItem || scmResourceState == jjParentFileItem || scmResourceState == jjInspectedFileItem)"
+        },
+        {
+          "command": "jj.openDiff",
+          "group": "1_open@1",
+          "when": "scmProvider == jj && scmResourceState != jjConflictFileItem && scmResourceState != jjConflictFileDeletionItem"
+        },
+        {
+          "command": "jj.openFile",
+          "group": "1_open@2",
+          "when": "scmProvider == jj && scmResourceState != jjConflictFileItem && scmResourceState != jjConflictFileDeletionItem"
+        },
+        {
+          "command": "jj.squashFile",
+          "group": "2_squash@1",
+          "when": "scmProvider == jj && (scmResourceState == jjWorkingFileItem || scmResourceState == jjParentFileItem || scmResourceState == jjInspectedFileItem)"
+        },
+        {
+          "command": "jj.squashFileInto",
+          "group": "2_squash@2",
+          "when": "scmProvider == jj && (scmResourceState == jjWorkingFileItem || scmResourceState == jjParentFileItem || scmResourceState == jjInspectedFileItem)"
+        },
+        {
+          "command": "jj.revertFile",
+          "group": "3_restore@1",
+          "when": "scmProvider == jj && scmResourceState != jjConflictFileItem && scmResourceState != jjConflictFileDeletionItem"
+        },
+        {
+          "command": "jj.copyPath",
+          "group": "4_copy@1",
+          "when": "scmProvider == jj"
+        },
+        {
+          "command": "jj.moveFileToWorking",
+          "group": "5_move@1",
+          "when": "scmProvider == jj && (scmResourceState == jjParentFileItem || scmResourceState == jjInspectedFileItem)"
         }
       ]
     }
@@ -331,7 +463,7 @@
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
     "package-vsix": "npx --yes @vscode/vsce package --no-dependencies",
-    "install-extension": "pnpm run package-vsix && code --install-extension simple-jj-0.0.2.vsix --force",
+    "install-extension": "pnpm run package-vsix && code --install-extension simple-jj-0.0.4.vsix --force",
     "test": "vscode-test"
   },
   "devDependencies": {

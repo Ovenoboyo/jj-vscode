@@ -4,6 +4,7 @@ export interface JJChangeInfo {
   changeId: string;
   shortestLen: number;
   commitId: string;
+  fullCommitId?: string;
   description: string;
   bookmarks: string[];
   remoteBookmarks: string[];

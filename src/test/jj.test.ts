@@ -32,6 +32,9 @@ suite('JJ SCM Test Suite', function () {
     await runCmd('jj', ['git', 'init'], tempDir);
     await runCmd('jj', ['config', 'set', '--repo', 'user.name', 'Test User'], tempDir);
     await runCmd('jj', ['config', 'set', '--repo', 'user.email', 'test@example.com'], tempDir);
+    await runCmd('jj', ['config', 'set', '--repo', 'signing.behavior', 'drop'], tempDir);
+    await runCmd('jj', ['config', 'set', '--repo', 'signing.backend', 'none'], tempDir);
+    await runCmd('git', ['config', 'commit.gpgsign', 'false'], tempDir);
     await runCmd('jj', ['config', 'set', '--repo', 'revset-aliases."immutable_heads()"', 'none()'], tempDir);
     await runCmd('jj', ['git', 'remote', 'add', 'origin', remoteDir], tempDir);
 
@@ -463,5 +466,69 @@ suite('JJ SCM Test Suite', function () {
     const graph = await jj.getCommitGraph('origin');
     const oldBranchCommit = graph.find((c) => c.description === 'Old branch commit');
     assert.strictEqual(oldBranchCommit, undefined, 'Old branch should be hidden when >= 10 commits behind main');
+  });
+
+  test('isGitBackend and getFullCommitId', async () => {
+    const isGit = await jj.isGitBackend();
+    assert.strictEqual(isGit, true, 'Repository initialized with jj git init should be git-backed');
+
+    const fullId = await jj.getFullCommitId('@');
+    assert.strictEqual(typeof fullId, 'string');
+    assert.strictEqual(fullId.length, 40, `Full commit ID should be 40 characters hex, got ${fullId}`);
+  });
+
+  test('hasFixTools detection', async () => {
+    const initialTools = await jj.hasFixTools();
+    assert.strictEqual(initialTools, false, 'No fix tools should be configured initially');
+
+    await runCmd('jj', ['config', 'set', '--repo', 'fix.tools.dummy.command', '["cat"]'], tempDir);
+    const configuredTools = await jj.hasFixTools();
+    assert.strictEqual(configuredTools, true, 'hasFixTools should return true when fix.tools is configured');
+  });
+
+  test('moveBookmark moves existing bookmark to target revision', async () => {
+    await jj.newChange();
+    await jj.describeChange('Bookmark test change 1');
+    await jj.createBookmark('movable-bookmark');
+
+    await jj.newChange();
+    await jj.describeChange('Bookmark test change 2');
+
+    await jj.moveBookmark('movable-bookmark', '@');
+
+    const info = await jj.getChangeInfo('@');
+    assert.ok(info?.bookmarks.includes('movable-bookmark'), 'Bookmark should now be attached to current revision');
+  });
+
+  test('rebaseCommit supports single and multiple parents', async () => {
+    // Parent A
+    await jj.newChange('main@origin');
+    await jj.describeChange('Parent A');
+    const parentAInfo = await jj.getChangeInfo('@');
+    const idA = parentAInfo!.changeId;
+
+    // Parent B
+    await jj.newChange('main@origin');
+    await jj.describeChange('Parent B');
+    const parentBInfo = await jj.getChangeInfo('@');
+    const idB = parentBInfo!.changeId;
+
+    // Branch to rebase
+    await jj.newChange('main@origin');
+    await jj.describeChange('Feature to rebase');
+
+    // Rebase onto both A and B (creating a merge commit)
+    await jj.rebaseCommit('@', [idA, idB], false);
+
+    const rebasedInfo = await jj.getChangeInfo('@');
+    assert.strictEqual(rebasedInfo?.parentIds.length, 2, 'Rebased commit should now have 2 parents');
+  });
+
+  test('getBaseRevision resolves merge base or parent', async () => {
+    await jj.newChange('main@origin');
+    await jj.describeChange('Base revision test');
+
+    const baseRev = await jj.getBaseRevision('@');
+    assert.ok(baseRev && baseRev.length > 0, 'Should find base revision');
   });
 });

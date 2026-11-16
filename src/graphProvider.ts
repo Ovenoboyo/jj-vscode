@@ -32,19 +32,32 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
         await vscode.commands.executeCommand('jj.describe', message.changeId);
       } else if (message.command === 'splitCommit') {
         await vscode.commands.executeCommand('jj.splitCommit', message.changeId);
+      } else if (message.command === 'squashCommit') {
+        await vscode.commands.executeCommand('jj.squashCommit', message.changeId);
+      } else if (message.command === 'squashCommitInto') {
+        await vscode.commands.executeCommand('jj.squashCommitInto', message.changeId);
+      } else if (message.command === 'rebaseCommit') {
+        await vscode.commands.executeCommand('jj.rebaseCommit', message.changeId);
+      } else if (message.command === 'moveBookmarkHere') {
+        await vscode.commands.executeCommand('jj.moveBookmarkHere', message.changeId);
+      } else if (message.command === 'fixReachable') {
+        await vscode.commands.executeCommand('jj.fixReachable', message.changeId);
+      } else if (message.command === 'newChild' || message.command === 'newOnTop') {
+        await vscode.commands.executeCommand('jj.newChild', message.changeId);
+      } else if (message.command === 'viewDiffToBase') {
+        await vscode.commands.executeCommand('jj.viewDiffToBase', message.changeId);
+      } else if (message.command === 'copyChangeId') {
+        await vscode.commands.executeCommand('jj.copyChangeId', message.changeId);
+      } else if (message.command === 'copyCommitHash') {
+        await vscode.commands.executeCommand('jj.copyCommitHash', message.changeId);
+      } else if (message.command === 'createBookmark') {
+        await vscode.commands.executeCommand('jj.createBookmark', message.changeId);
       } else if (message.command === 'editCommit') {
         try {
           await this.jj.editChange(message.changeId);
           await vscode.commands.executeCommand('jj.refresh');
         } catch (err: any) {
           vscode.window.showErrorMessage(`Failed to edit commit: ${err.message}`);
-        }
-      } else if (message.command === 'newOnTop') {
-        try {
-          await this.jj.newChange(message.changeId);
-          await vscode.commands.executeCommand('jj.refresh');
-        } catch (err: any) {
-          vscode.window.showErrorMessage(`Failed to create change on commit: ${err.message}`);
         }
       } else if (message.command === 'pushChain') {
         try {
@@ -155,15 +168,26 @@ export class JJGraphWebviewProvider implements vscode.WebviewViewProvider {
     }
     try {
       const activeRemote = await this.getActiveRemote();
-      const commits = await this.jj.getCommitGraph(activeRemote);
-      const current = await this.jj.getChangeInfo('@');
-      this._view.webview.html = this.getHtml(commits, current?.commitId || current?.changeId || '', selectedCommitId, activeRemote);
+      const [commits, current, isGit, hasFixTools] = await Promise.all([
+        this.jj.getCommitGraph(activeRemote),
+        this.jj.getChangeInfo('@'),
+        this.jj.isGitBackend(),
+        this.jj.hasFixTools(),
+      ]);
+      this._view.webview.html = this.getHtml(commits, current?.commitId || current?.changeId || '', selectedCommitId, activeRemote, isGit, hasFixTools);
     } catch {
       this._view.webview.html = '<div style="padding: 12px; color: var(--vscode-errorForeground);">Failed to load JJ Graph</div>';
     }
   }
 
-  private getHtml(commits: JJChangeInfo[], currentId: string, selectedCommitId?: string, activeRemote?: string): string {
-    return getGraphHtml(commits, currentId, selectedCommitId, activeRemote);
+  private getHtml(
+    commits: JJChangeInfo[],
+    currentId: string,
+    selectedCommitId?: string,
+    activeRemote?: string,
+    isGit: boolean = false,
+    hasFixTools: boolean = false
+  ): string {
+    return getGraphHtml(commits, currentId, selectedCommitId, activeRemote, isGit, hasFixTools);
   }
 }

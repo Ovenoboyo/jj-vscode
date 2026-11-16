@@ -191,9 +191,10 @@ export function registerGeneralCommands(deps: CommandDependencies): vscode.Dispo
     'jj.selectCommit',
     async (arg?: string | any) => {
       const changeId = typeof arg === 'string' ? arg : undefined;
-      const current = getSelectedCommitId();
-      setSelectedCommitId(changeId === current ? undefined : changeId);
-      await refresh();
+      if (changeId) {
+        setSelectedCommitId(changeId);
+        await refresh();
+      }
     }
   );
 
@@ -500,25 +501,18 @@ export function registerGeneralCommands(deps: CommandDependencies): vscode.Dispo
 
   const openFileCmd = vscode.commands.registerCommand(
     'jj.openFile',
-    async (resource: JJResourceState) => {
-      if (!resource || !resource.relativePath) {
+    async (resource: any) => {
+      if (!resource) {
+        return;
+      }
+      const relPath = resource.relativePath || (resource.resourceUri ? path.relative(rootPath, resource.resourceUri.fsPath) : undefined);
+      if (!relPath) {
         return;
       }
       try {
-        if (resource.fromRev === '@') {
-          const doc = await vscode.workspace.openTextDocument(
-            vscode.Uri.file(path.join(rootPath, resource.relativePath))
-          );
-          await vscode.window.showTextDocument(doc);
-        } else {
-          const revUri = vscode.Uri.from({
-            scheme: JJ_DIFF_SCHEME,
-            path: resource.relativePath,
-            query: resource.fromRev,
-          });
-          const doc = await vscode.workspace.openTextDocument(revUri);
-          await vscode.window.showTextDocument(doc);
-        }
+        const fileUri = vscode.Uri.file(path.join(rootPath, relPath));
+        const doc = await vscode.workspace.openTextDocument(fileUri);
+        await vscode.window.showTextDocument(doc);
       } catch (err: any) {
         vscode.window.showErrorMessage(`Failed to open file: ${err.message}`);
       }
@@ -527,30 +521,32 @@ export function registerGeneralCommands(deps: CommandDependencies): vscode.Dispo
 
   const revertFileCmd = vscode.commands.registerCommand(
     'jj.revertFile',
-    async (resource: JJResourceState) => {
-      if (!resource || !resource.relativePath) {
+    async (resource: any, ...extraArgs: any[]) => {
+      if (!resource) {
+        return;
+      }
+      const { paths, fromRev, intoRev, isWorkingGroup } = extractPathsAndRevs(resource, extraArgs);
+      if (paths.length === 0) {
         return;
       }
 
-      const fileName = path.basename(resource.relativePath);
-      const isWorkingCopy = resource.fromRev === '@';
+      const isWorkingCopy = fromRev === '@' || isWorkingGroup || resource.contextValue === 'jjWorkingFileItem';
+      const displayName = paths.length === 1 ? `'${paths[0]}'` : `${paths.length} items`;
       const promptMsg = isWorkingCopy
-        ? `Are you sure you want to discard changes in '${fileName}'?`
-        : `Revert '${fileName}'? Changes will be placed into your working copy.`;
+        ? `Are you sure you want to discard changes in ${displayName}?`
+        : `Revert ${displayName}? Changes will be placed into your working copy.`;
 
-      const confirm = await vscode.window.showWarningMessage(promptMsg, { modal: true }, 'Revert File');
-      if (confirm !== 'Revert File') {
+      const confirm = await vscode.window.showWarningMessage(promptMsg, { modal: true }, 'Discard Changes');
+      if (confirm !== 'Discard Changes') {
         return;
       }
 
       try {
-        const pathsToRestore = resource.oldRelativePath
-          ? [resource.relativePath, resource.oldRelativePath]
-          : [resource.relativePath];
+        const targetInto = intoRev || '@-';
         if (isWorkingCopy) {
-          await jj.restoreFile('@', '@-', ...pathsToRestore);
+          await jj.restoreFile('@', '@-', ...paths);
         } else {
-          await jj.restoreFile('@', resource.intoRev, ...pathsToRestore);
+          await jj.restoreFile('@', targetInto, ...paths);
         }
         await refresh();
       } catch (err: any) {
@@ -655,6 +651,339 @@ export function registerGeneralCommands(deps: CommandDependencies): vscode.Dispo
     }
   );
 
+  const squashCommitCmd = vscode.commands.registerCommand(
+    'jj.squashCommit',
+    async (targetRev?: string) => {
+      try {
+        const rev = typeof targetRev === 'string' ? targetRev : (getSelectedCommitId() || '@');
+        const info = await jj.getChangeInfo(rev);
+        const parent = info?.parentIds[0] || `${rev}-`;
+        await jj.squashAll(rev, parent);
+        await refresh();
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`Squash failed: ${err.message}`);
+      }
+    }
+  );
+
+  const squashCommitIntoCmd = vscode.commands.registerCommand(
+    'jj.squashCommitInto',
+    async (targetRev?: string) => {
+      try {
+        const rev = typeof targetRev === 'string' ? targetRev : (getSelectedCommitId() || '@');
+        const activeRemote = await getActiveRemote();
+        const graph = await jj.getCommitGraph(activeRemote);
+        const candidates = graph.filter((c) => c.changeId !== rev && c.commitId !== rev);
+
+        const picks = candidates.map((c) => ({
+          label: c.changeId,
+          description: c.description.split('\n')[0] || (c.empty ? '(empty)' : ''),
+          detail: c.bookmarks.join(', '),
+          targetId: c.changeId,
+        }));
+
+        const chosen = await vscode.window.showQuickPick(picks, {
+          placeHolder: `Select commit to squash ${rev} into:`,
+        });
+
+        if (!chosen) {
+          return;
+        }
+
+        await jj.squashAll(rev, chosen.targetId);
+        await refresh();
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`Squash into failed: ${err.message}`);
+      }
+    }
+  );
+
+  const squashFileIntoCmd = vscode.commands.registerCommand(
+    'jj.squashFileInto',
+    async (resource: any, ...extraArgs: any[]) => {
+      if (!resource) {
+        return;
+      }
+      try {
+        const { paths, fromRev, isWorkingGroup } = extractPathsAndRevs(resource, extraArgs);
+        const srcRev = fromRev || (isWorkingGroup || resource.contextValue === 'jjWorkingFileItem' ? '@' : (getSelectedCommitId() || '@-'));
+
+        const activeRemote = await getActiveRemote();
+        const graph = await jj.getCommitGraph(activeRemote);
+        const candidates = graph.filter((c) => c.changeId !== srcRev && c.commitId !== srcRev);
+
+        const picks = candidates.map((c) => ({
+          label: c.changeId,
+          description: c.description.split('\n')[0] || (c.empty ? '(empty)' : ''),
+          detail: c.bookmarks.join(', '),
+          targetId: c.changeId,
+        }));
+
+        const chosen = await vscode.window.showQuickPick(picks, {
+          placeHolder: `Select target commit to squash file(s) into:`,
+        });
+
+        if (!chosen) {
+          return;
+        }
+
+        if (paths.length > 0) {
+          await jj.moveFile(srcRev, chosen.targetId, ...paths);
+        } else {
+          await jj.squashAll(srcRev, chosen.targetId);
+        }
+        await refresh();
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`Squash file into failed: ${err.message}`);
+      }
+    }
+  );
+
+  const copyPathCmd = vscode.commands.registerCommand(
+    'jj.copyPath',
+    async (resource: any, ...extraArgs: any[]) => {
+      if (!resource) {
+        return;
+      }
+      try {
+        const { paths } = extractPathsAndRevs(resource, extraArgs);
+        if (paths.length > 0) {
+          const text = paths.join('\n');
+          await vscode.env.clipboard.writeText(text);
+          vscode.window.showInformationMessage(`Copied path: ${text}`);
+        }
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`Failed to copy path: ${err.message}`);
+      }
+    }
+  );
+
+  const openDiffCmd = vscode.commands.registerCommand(
+    'jj.openDiff',
+    async (resource: any) => {
+      if (!resource) {
+        return;
+      }
+      if (resource.command && resource.command.command === 'vscode.diff') {
+        await vscode.commands.executeCommand('vscode.diff', ...resource.command.arguments);
+      } else {
+        const rel = resource.relativePath;
+        if (rel) {
+          const fromRev = resource.fromRev || '@';
+          const intoRev = resource.intoRev || '@-';
+          const fileUri = vscode.Uri.file(path.join(rootPath, rel));
+          const baseUri = vscode.Uri.from({
+            scheme: JJ_DIFF_SCHEME,
+            path: resource.oldRelativePath || rel,
+            query: intoRev,
+          });
+          const targetUri = fromRev === '@'
+            ? fileUri
+            : vscode.Uri.from({
+                scheme: JJ_DIFF_SCHEME,
+                path: rel,
+                query: fromRev,
+              });
+          const fileName = path.basename(rel);
+          await vscode.commands.executeCommand('vscode.diff', baseUri, targetUri, `${fileName} (${fromRev} vs ${intoRev})`);
+        }
+      }
+    }
+  );
+
+  const rebaseCommitCmd = vscode.commands.registerCommand(
+    'jj.rebaseCommit',
+    async (sourceRev?: string) => {
+      try {
+        const src = typeof sourceRev === 'string' ? sourceRev : (getSelectedCommitId() || '@');
+        const activeRemote = await getActiveRemote();
+        const graph = await jj.getCommitGraph(activeRemote);
+        const candidates = graph.filter((c) => c.changeId !== src && c.commitId !== src);
+
+        const picks = candidates.map((c) => ({
+          label: c.changeId,
+          description: c.description.split('\n')[0] || (c.empty ? '(empty)' : ''),
+          detail: c.bookmarks.join(', '),
+          targetId: c.changeId,
+        }));
+
+        const chosen = await vscode.window.showQuickPick(picks, {
+          placeHolder: `Select destination parent(s) for ${src} (multi-select allowed for merge)`,
+          canPickMany: true,
+        });
+
+        if (!chosen || chosen.length === 0) {
+          return;
+        }
+
+        const dests = chosen.map((c) => c.targetId);
+
+        const choice = await vscode.window.showQuickPick(
+          [
+            {
+              label: 'This commit and its descendants (-s)',
+              description: `Rebase subtree starting at ${src}`,
+              subtree: true,
+            },
+            {
+              label: 'Only this commit (-r)',
+              description: `Rebase ${src} without its descendants`,
+              subtree: false,
+            },
+          ],
+          { placeHolder: `Rebase type for ${src} onto ${dests.join(', ')}?` }
+        );
+
+        if (!choice) {
+          return;
+        }
+
+        await jj.rebaseCommit(src, dests, choice.subtree);
+        vscode.window.showInformationMessage(`Rebased ${src} onto ${dests.join(', ')}`);
+        await refresh();
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`Rebase failed: ${err.message}`);
+      }
+    }
+  );
+
+  const moveBookmarkHereCmd = vscode.commands.registerCommand(
+    'jj.moveBookmarkHere',
+    async (targetRev?: string) => {
+      try {
+        const rev = typeof targetRev === 'string' ? targetRev : (getSelectedCommitId() || '@');
+        const activeRemote = await getActiveRemote();
+        const bookmarks = await jj.getBookmarks(activeRemote);
+        if (bookmarks.length === 0) {
+          vscode.window.showInformationMessage('No bookmarks found to move.');
+          return;
+        }
+
+        const selected = await vscode.window.showQuickPick(bookmarks, {
+          placeHolder: `Select bookmark to move to ${rev}:`,
+        });
+
+        if (!selected) {
+          return;
+        }
+
+        const cleanName = selected.includes('@') ? selected.split('@')[0] : selected;
+        await jj.moveBookmark(cleanName, rev);
+        vscode.window.showInformationMessage(`Moved bookmark '${cleanName}' to ${rev}.`);
+        await refresh();
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`Failed to move bookmark: ${err.message}`);
+      }
+    }
+  );
+
+  const fixReachableCmd = vscode.commands.registerCommand(
+    'jj.fixReachable',
+    async (targetRev?: string) => {
+      try {
+        const rev = typeof targetRev === 'string' ? targetRev : (getSelectedCommitId() || '@');
+        await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: `Running jj fix on reachable commits from ${rev}...` },
+          async () => {
+            await jj.fixReachable(rev);
+          }
+        );
+        vscode.window.showInformationMessage(`Fixed reachable commits from ${rev}.`);
+        await refresh();
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`Fix failed: ${err.message}`);
+      }
+    }
+  );
+
+  const newChildCmd = vscode.commands.registerCommand(
+    'jj.newChild',
+    async (targetRev?: string) => {
+      try {
+        const rev = typeof targetRev === 'string' ? targetRev : (getSelectedCommitId() || '@');
+        await jj.newChange(rev);
+        setSelectedCommitId(undefined);
+        await refresh();
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`Failed to create new child commit: ${err.message}`);
+      }
+    }
+  );
+
+  const viewDiffToBaseCmd = vscode.commands.registerCommand(
+    'jj.viewDiffToBase',
+    async (targetRev?: string) => {
+      try {
+        const rev = typeof targetRev === 'string' ? targetRev : (getSelectedCommitId() || '@');
+        const baseRev = await jj.getBaseRevision(rev);
+        const rawDiffFiles: JJDiffFile[] = await jj.getDiffSummary(rev);
+        const diffFiles = await filterFilesWithDiff(rawDiffFiles, rev, baseRev, rootPath, jj);
+
+        if (diffFiles.length === 0) {
+          vscode.window.showInformationMessage(`No changes between base ${baseRev} and ${rev}.`);
+          return;
+        }
+
+        const resources: [vscode.Uri, vscode.Uri | undefined, vscode.Uri | undefined][] = diffFiles.map((file) => {
+          const fileUri = vscode.Uri.file(path.join(rootPath, file.path));
+
+          let originalUri: vscode.Uri | undefined = vscode.Uri.from({
+            scheme: JJ_DIFF_SCHEME,
+            path: file.oldPath || file.path,
+            query: baseRev,
+          });
+
+          let modifiedUri: vscode.Uri | undefined =
+            rev === '@'
+              ? fileUri
+              : vscode.Uri.from({
+                  scheme: JJ_DIFF_SCHEME,
+                  path: file.path,
+                  query: rev,
+                });
+
+          if (file.status === 'A') {
+            originalUri = undefined;
+          } else if (file.status === 'D') {
+            modifiedUri = undefined;
+          }
+
+          return [fileUri, originalUri, modifiedUri];
+        });
+
+        const title = `Diff ${baseRev} ➔ ${rev}`;
+        await vscode.commands.executeCommand('vscode.changes', title, resources);
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`Failed to view diff to base: ${err.message}`);
+      }
+    }
+  );
+
+  const copyChangeIdCmd = vscode.commands.registerCommand(
+    'jj.copyChangeId',
+    async (targetRev?: string) => {
+      const rev = typeof targetRev === 'string' ? targetRev : (getSelectedCommitId() || '@');
+      const info = await jj.getChangeInfo(rev);
+      const changeId = info?.changeId || rev;
+      await vscode.env.clipboard.writeText(changeId);
+      vscode.window.showInformationMessage(`Copied Change ID: ${changeId}`);
+    }
+  );
+
+  const copyCommitHashCmd = vscode.commands.registerCommand(
+    'jj.copyCommitHash',
+    async (targetRev?: string) => {
+      const rev = typeof targetRev === 'string' ? targetRev : (getSelectedCommitId() || '@');
+      const fullHash = await jj.getFullCommitId(rev);
+      if (fullHash) {
+        await vscode.env.clipboard.writeText(fullHash);
+        vscode.window.showInformationMessage(`Copied Git Commit Hash: ${fullHash}`);
+      } else {
+        vscode.window.showErrorMessage(`Could not resolve git commit hash for ${rev}`);
+      }
+    }
+  );
+
   const refreshCmd = vscode.commands.registerCommand('jj.refresh', () => refresh());
 
   return [
@@ -662,6 +991,18 @@ export function registerGeneralCommands(deps: CommandDependencies): vscode.Dispo
     selectRemoteCmd,
     openMultiDiffCmd,
     splitCommitCmd,
+    squashCommitCmd,
+    squashCommitIntoCmd,
+    squashFileIntoCmd,
+    copyPathCmd,
+    openDiffCmd,
+    rebaseCommitCmd,
+    moveBookmarkHereCmd,
+    fixReachableCmd,
+    newChildCmd,
+    viewDiffToBaseCmd,
+    copyChangeIdCmd,
+    copyCommitHashCmd,
     addRemoteCmd,
     removeRemoteCmd,
     selectCommitCmd,

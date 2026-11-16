@@ -5,7 +5,9 @@ export function getGraphHtml(
   commits: JJChangeInfo[],
   currentId: string,
   selectedCommitId?: string,
-  activeRemote?: string
+  activeRemote?: string,
+  isGit: boolean = false,
+  hasFixTools: boolean = false
 ): string {
   const serializedCommits = JSON.stringify(commits);
 
@@ -34,6 +36,8 @@ export function getGraphHtml(
     const currentId = "${currentId}";
     const selectedId = "${selectedCommitId || ''}";
     const activeRemote = "${activeRemote || ''}";
+    const isGitRepo = ${isGit ? 'true' : 'false'};
+    const hasFixToolsConfigured = ${hasFixTools ? 'true' : 'false'};
     const container = document.getElementById('graph-container');
     const overlay = document.getElementById('overlay-canvas');
     const outwardPath = document.getElementById('outward-path');
@@ -297,91 +301,115 @@ export function getGraphHtml(
 
         contextMenu.innerHTML = '';
 
-        const multiDiffOpt = document.createElement('div');
-        multiDiffOpt.className = 'menu-item';
-        multiDiffOpt.textContent = 'Open Unified Diff';
-        multiDiffOpt.onclick = () => {
+        function addMenuItem(text, onClick) {
+          const item = document.createElement('div');
+          item.className = 'menu-item';
+          item.textContent = text;
+          item.onclick = (ev) => {
+            ev.stopPropagation();
+            contextMenu.style.display = 'none';
+            onClick();
+          };
+          contextMenu.appendChild(item);
+        }
+
+        function addSeparator() {
+          const sep = document.createElement('div');
+          sep.className = 'menu-separator';
+          contextMenu.appendChild(sep);
+        }
+
+        addMenuItem('New Child Commit', () => {
+          vscode.postMessage({ command: 'newChild', changeId: c.changeId });
+        });
+
+        addMenuItem('Open Unified Diff', () => {
           vscode.postMessage({ command: 'openMultiDiff', changeId: c.changeId });
-        };
-        contextMenu.appendChild(multiDiffOpt);
+        });
 
-        const pushBranchOpt = document.createElement('div');
-        pushBranchOpt.className = 'menu-item';
-        pushBranchOpt.textContent = 'Upload / Push This Chain';
-        pushBranchOpt.onclick = () => {
-          vscode.postMessage({ command: 'pushChain', changeId: c.changeId });
-        };
-        contextMenu.appendChild(pushBranchOpt);
+        addMenuItem('View Diff to Base', () => {
+          vscode.postMessage({ command: 'viewDiffToBase', changeId: c.changeId });
+        });
 
-        const bookmarkOpt = document.createElement('div');
-        bookmarkOpt.className = 'menu-item';
-        bookmarkOpt.textContent = 'Create Bookmark Here...';
-        bookmarkOpt.onclick = () => {
-          vscode.postMessage({ command: 'createBookmark', changeId: c.changeId });
-        };
-        contextMenu.appendChild(bookmarkOpt);
+        addSeparator();
+
+        addMenuItem('Squash', () => {
+          vscode.postMessage({ command: 'squashCommit', changeId: c.changeId });
+        });
+
+        addMenuItem('Squash Into...', () => {
+          vscode.postMessage({ command: 'squashCommitInto', changeId: c.changeId });
+        });
+
+        addMenuItem('Rebase...', () => {
+          vscode.postMessage({ command: 'rebaseCommit', changeId: c.changeId });
+        });
+
+        addMenuItem('Move Branch Bookmark Here...', () => {
+          vscode.postMessage({ command: 'moveBookmarkHere', changeId: c.changeId });
+        });
+
+        if (hasFixToolsConfigured) {
+          addMenuItem('Fix Reachable Commits', () => {
+            vscode.postMessage({ command: 'fixReachable', changeId: c.changeId });
+          });
+        }
 
         if (c.isDivergent) {
-          const convergeOpt = document.createElement('div');
-          convergeOpt.className = 'menu-item';
-          convergeOpt.textContent = 'Converge Divergent Changes';
-          convergeOpt.onclick = () => {
+          addMenuItem('Converge Divergent Changes', () => {
             vscode.postMessage({ command: 'convergeCommit', changeId: c.changeId, commitId: c.commitId });
-          };
-          contextMenu.appendChild(convergeOpt);
+          });
         }
 
         if (c.bookmarks && c.bookmarks.length > 0) {
           c.bookmarks.forEach((bm) => {
-            const removeBmOpt = document.createElement('div');
-            removeBmOpt.className = 'menu-item';
-            removeBmOpt.textContent = \`Remove Bookmark '\${bm}'\`;
-            removeBmOpt.onclick = () => {
+            addMenuItem(\`Remove Bookmark '\${bm}'\`, () => {
               vscode.postMessage({ command: 'removeBookmark', bookmark: bm });
-            };
-            contextMenu.appendChild(removeBmOpt);
+            });
           });
         }
 
-        const sep = document.createElement('div');
-        sep.className = 'menu-separator';
-        contextMenu.appendChild(sep);
+        addMenuItem('Upload / Push This Chain', () => {
+          vscode.postMessage({ command: 'pushChain', changeId: c.changeId });
+        });
 
-        const describeOpt = document.createElement('div');
-        describeOpt.className = 'menu-item';
-        describeOpt.textContent = 'Describe Change...';
-        describeOpt.onclick = () => {
+        addMenuItem('Create Bookmark Here...', () => {
+          vscode.postMessage({ command: 'createBookmark', changeId: c.changeId });
+        });
+
+        addSeparator();
+
+        addMenuItem('Describe Change...', () => {
           vscode.postMessage({ command: 'describeCommit', changeId: c.changeId });
-        };
-        contextMenu.appendChild(describeOpt);
+        });
 
-        const splitOpt = document.createElement('div');
-        splitOpt.className = 'menu-item';
-        splitOpt.textContent = 'Split Commit...';
-        splitOpt.onclick = () => {
+        addMenuItem('Split Commit...', () => {
           vscode.postMessage({ command: 'splitCommit', changeId: c.changeId });
-        };
-        contextMenu.appendChild(splitOpt);
+        });
 
-        const editOpt = document.createElement('div');
-        editOpt.className = 'menu-item';
-        editOpt.textContent = 'Edit This Change';
-        editOpt.onclick = () => {
+        addMenuItem('Edit This Change', () => {
           vscode.postMessage({ command: 'editCommit', changeId: c.changeId });
-        };
-        contextMenu.appendChild(editOpt);
+        });
 
-        const abandonOpt = document.createElement('div');
-        abandonOpt.className = 'menu-item';
-        abandonOpt.textContent = 'Abandon Commit';
-        abandonOpt.onclick = () => {
+        addMenuItem('Abandon Commit', () => {
           vscode.postMessage({ command: 'abandonCommit', changeId: c.changeId });
-        };
-        contextMenu.appendChild(abandonOpt);
+        });
+
+        addSeparator();
+
+        addMenuItem('Copy Change ID', () => {
+          vscode.postMessage({ command: 'copyChangeId', changeId: c.changeId });
+        });
+
+        if (isGitRepo) {
+          addMenuItem('Copy Git Commit Hash', () => {
+            vscode.postMessage({ command: 'copyCommitHash', changeId: c.changeId });
+          });
+        }
 
         contextMenu.style.display = 'block';
-        const menuWidth = 190;
-        const menuHeight = contextMenu.offsetHeight || 160;
+        const menuWidth = 210;
+        const menuHeight = contextMenu.offsetHeight || 260;
         let posX = e.clientX;
         let posY = e.clientY;
 
@@ -449,6 +477,11 @@ export function getGraphHtml(
           <span class="description">\${descText}</span>
         </div>
         <div class="action-button-group">
+          <button class="commit-action-btn btn-new-child" title="Create new child on this commit">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M8 2a.75.75 0 0 1 .75.75v4.5h4.5a.75.75 0 0 1 0 1.5h-4.5v4.5a.75.75 0 0 1-1.5 0v-4.5h-4.5a.75.75 0 0 1 0-1.5h4.5v-4.5A.75.75 0 0 1 8 2Z"/>
+            </svg>
+          </button>
           <button class="commit-action-btn btn-edit" title="Edit this commit directly">
             <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
               <path d="M12.854.146a.5.5 0 0 0-.707 0L10.5 1.793 14.207 5.5l1.647-1.646a.5.5 0 0 0 0-.708l-3-3zm.646 6.061L9.793 2.5 3.293 9H3.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.207l6.5-6.5zm-7.468 7.468A.5.5 0 0 1 6 13.5V13h-.5a.5.5 0 0 1-.5-.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.5-.5V10h-.5a.499.499 0 0 1-.175-.032l-.179.178a.5.5 0 0 0-.11.168l-2 5a.5.5 0 0 0 .65.65l5-2a.5.5 0 0 0 .168-.11l.178-.178z"/>
@@ -466,6 +499,14 @@ export function getGraphHtml(
           </button>
         </div>
       \`;
+
+      const newChildBtn = row.querySelector('.btn-new-child');
+      if (newChildBtn) {
+        newChildBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          vscode.postMessage({ command: 'newChild', changeId: c.changeId });
+        });
+      }
 
       const editBtn = row.querySelector('.btn-edit');
       if (editBtn) {
